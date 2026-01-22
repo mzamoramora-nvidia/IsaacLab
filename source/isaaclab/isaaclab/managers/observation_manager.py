@@ -388,6 +388,9 @@ class ObservationManager(ManagerBase):
         for term_name, term_cfg in obs_terms:
             # compute term's value
             obs: torch.Tensor = term_cfg.func(self._env, **term_cfg.params).clone()
+            if torch.any(~torch.isfinite(obs)):
+                obs[~torch.isfinite(obs)] = 0.0
+                # raise ValueError(f"Non-finite observation value detected in term '{term_name}': {obs}")
             # apply post-processing
             if term_cfg.modifiers is not None:
                 for modifier in term_cfg.modifiers:

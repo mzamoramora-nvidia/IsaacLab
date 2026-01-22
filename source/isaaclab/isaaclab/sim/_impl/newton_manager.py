@@ -9,8 +9,7 @@ import numpy as np
 import re
 
 import warp as wp
-from newton import Axis, Contacts, Control, Model, ModelBuilder, State, eval_fk
-from newton.examples import create_collision_pipeline
+from newton import Axis, BroadPhaseMode, CollisionPipelineUnified, Contacts, Control, Model, ModelBuilder, State, eval_fk
 from newton.sensors import ContactSensor as NewtonContactSensor
 from newton.sensors import populate_contacts
 from newton.solvers import SolverBase, SolverFeatherstone, SolverMuJoCo, SolverNotifyFlags, SolverXPBD
@@ -136,8 +135,12 @@ class NewtonManager:
         NewtonManager._state_temp = NewtonManager._model.state()
         NewtonManager._control = NewtonManager._model.control()
         NewtonManager.forward_kinematics()
+        # If solver settings are known early, we can build the pipeline here.
+        # Otherwise it will be created in initialize_solver() after solver config is resolved.
         if NewtonManager._needs_collision_pipeline:
-            NewtonManager._collision_pipeline = create_collision_pipeline(NewtonManager._model)
+            NewtonManager._collision_pipeline = CollisionPipelineUnified.from_model(
+                NewtonManager._model, broad_phase_mode=BroadPhaseMode.SAP
+            )
             NewtonManager._contacts = NewtonManager._model.collide(
                 NewtonManager._state_0, collision_pipeline=NewtonManager._collision_pipeline
             )
@@ -196,6 +199,13 @@ class NewtonManager:
                 )
             else:
                 NewtonManager._needs_collision_pipeline = True
+            if NewtonManager._needs_collision_pipeline and NewtonManager._collision_pipeline is None:
+                NewtonManager._collision_pipeline = CollisionPipelineUnified.from_model(
+                    NewtonManager._model, broad_phase_mode=BroadPhaseMode.SAP
+                )
+                NewtonManager._contacts = NewtonManager._model.collide(
+                    NewtonManager._state_0, collision_pipeline=NewtonManager._collision_pipeline
+                )
 
         # Ensure we are using a CUDA enabled device
         assert NewtonManager._device.startswith("cuda"), "NewtonManager only supports CUDA enabled devices"
@@ -228,6 +238,7 @@ class NewtonManager:
 
         if NewtonManager._num_substeps % 2 == 0:
             for i in range(NewtonManager._num_substeps):
+                NewtonManager._state_0.clear_forces()
                 NewtonManager._solver.step(
                     NewtonManager._state_0,
                     NewtonManager._state_1,
@@ -358,7 +369,6 @@ class NewtonManager:
     @classmethod
     def _get_solver(cls, model: Model, solver_cfg: dict) -> SolverBase:
         NewtonManager._solver_type = solver_cfg.pop("solver_type")
-
         if NewtonManager._solver_type == "mujoco_warp":
             return SolverMuJoCo(model, **solver_cfg)
         elif NewtonManager._solver_type == "xpbd":
@@ -375,7 +385,7 @@ class NewtonManager:
         shape_names_expr: str | list[str] | None = None,
         contact_partners_body_expr: str | list[str] | None = None,
         contact_partners_shape_expr: str | list[str] | None = None,
-        prune_noncolliding: bool = False,
+        prune_noncolliding: bool = True,
         verbose: bool = False,
     ):
         """Adds a contact view.

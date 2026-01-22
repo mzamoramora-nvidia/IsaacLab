@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import itertools
 import math
+import numpy as np
 import torch
 from typing import TYPE_CHECKING
 
@@ -67,7 +68,7 @@ def clone_from_template(stage: Usd.Stage, num_clones: int, template_clone_cfg: T
         # If all prototypes map to env_0, clone whole env_0 to all envs; else clone per-object
         if torch.all(proto_idx == 0):
             # args: src_paths, dest_paths, env_ids, mask
-            replicate_args = [clone_path_fmt.format(0)], [clone_path_fmt], world_indices, clone_masking
+            replicate_args = [clone_path_fmt.format(0)], [clone_path_fmt], world_indices, clone_masking[0].unsqueeze(0)
             get_pos = lambda path: stage.GetPrimAtPath(path).GetAttribute("xformOp:translate").Get()  # noqa: E731
             positions = torch.tensor([get_pos(clone_path_fmt.format(i)) for i in world_indices])
             if cfg.clone_physics:
@@ -283,9 +284,80 @@ def newton_replicate(
     simplify_meshes: bool = True,
 ):
     """Replicate prims into a Newton ``ModelBuilder`` using a per-source mapping."""
-    from newton import ModelBuilder, solvers
+    from newton import Mesh, ModelBuilder, solvers
 
     from isaaclab.sim._impl.newton_manager import NewtonManager
+
+    def _infer_object_shape_kind(stage: Usd.Stage, root_path: str) -> str:
+        root_prim = stage.GetPrimAtPath(f"{root_path}/geometry/mesh")
+        if root_prim:
+            stack = [root_prim]
+            while stack:
+                prim = stack.pop()
+                type_name = prim.GetTypeName().lower()
+                if type_name.endswith("sphere"):
+                    return "sphere"
+                if type_name.endswith("cube"):
+                    return "cube"
+                stack.extend(list(prim.GetChildren()))
+        return "cube"
+
+    def _create_cube_mesh(half_extent: float):
+        hx = hy = hz = half_extent
+        vertices = np.array(
+            [
+                [-hx, -hy, -hz],
+                [hx, -hy, -hz],
+                [hx, hy, -hz],
+                [-hx, hy, -hz],
+                [-hx, -hy, hz],
+                [hx, -hy, hz],
+                [hx, hy, hz],
+                [-hx, hy, hz],
+            ],
+            dtype=np.float32,
+        )
+        indices = np.array(
+            [
+                0, 2, 1,
+                0, 3, 2,
+                4, 5, 6,
+                4, 6, 7,
+                0, 4, 7,
+                0, 7, 3,
+                1, 2, 6,
+                1, 6, 5,
+                0, 1, 5,
+                0, 5, 4,
+                3, 7, 6,
+                3, 6, 2,
+            ],
+            dtype=np.int32,
+        )
+        return Mesh(vertices, indices)
+
+    def _create_uv_sphere_mesh(radius: float, lat_segments: int = 16, lon_segments: int = 32):
+        vertices = []
+        indices = []
+        for lat in range(lat_segments + 1):
+            theta = math.pi * lat / lat_segments
+            sin_t = math.sin(theta)
+            cos_t = math.cos(theta)
+            for lon in range(lon_segments + 1):
+                phi = 2.0 * math.pi * lon / lon_segments
+                x = radius * sin_t * math.cos(phi)
+                y = radius * sin_t * math.sin(phi)
+                z = radius * cos_t
+                vertices.append([x, y, z])
+        for lat in range(lat_segments):
+            for lon in range(lon_segments):
+                i0 = lat * (lon_segments + 1) + lon
+                i1 = i0 + 1
+                i2 = i0 + (lon_segments + 1)
+                i3 = i2 + 1
+                indices.extend([i0, i2, i1])
+                indices.extend([i1, i2, i3])
+        return Mesh(np.array(vertices, dtype=np.float32), np.array(indices, dtype=np.int32))
 
     if positions is None:
         positions = torch.zeros((mapping.size(1), 3), device=mapping.device, dtype=torch.float32)
@@ -294,44 +366,73 @@ def newton_replicate(
         quaternions[:, 3] = 1.0
 
     # load empty stage
-    builder = ModelBuilder(up_axis=up_axis)
-    stage_info = builder.add_usd(stage, ignore_paths=["/World/envs"] + sources)
+    scene = ModelBuilder(up_axis=up_axis)
+    stage_info = scene.add_usd(stage, ignore_paths=["/World/envs"] + sources)
 
     # build a prototype for each source
     protos: dict[str, ModelBuilder] = {}
     for src_path in sources:
         p = ModelBuilder(up_axis=up_axis)
         solvers.SolverMuJoCo.register_custom_attributes(p)
-        p.add_usd(stage, root_path=src_path, load_visual_shapes=True)
-        if simplify_meshes:
-            p.approximate_meshes("convex_hull")
+        if src_path.endswith("/object"):
+            shape_kind = _infer_object_shape_kind(stage, src_path)
+            body = p.add_link(key=src_path)
+            shape_cfg = ModelBuilder.ShapeConfig(
+                mu=0.5,
+                sdf_max_resolution=64,
+                sdf_narrow_band_range=(-0.02, 0.02),
+                contact_margin=0.01,
+                density=1000.0,
+            )
+            if shape_kind == "sphere":
+                mesh = _create_uv_sphere_mesh(radius=0.05)
+            else:
+                mesh = _create_cube_mesh(half_extent=0.0375)
+            p.add_shape_mesh(body, mesh=mesh, cfg=shape_cfg, key=f"{src_path}/geometry/mesh")
+            free_joint = p.add_joint_free(child=body, key=f"{src_path}/root_joint")
+            p.add_articulation([free_joint], key=src_path)
+        else:
+            p.add_usd(stage, root_path=src_path, load_visual_shapes=False, skip_mesh_approximation=True)
+            if simplify_meshes:
+                p.approximate_meshes("convex_hull")
         protos[src_path] = p
 
-    # add by world, then by active sources in that world (column-wise)
+    # create a separate world for each environment (heterogeneous spawning)
+    # Newton assigns sequential world IDs (0, 1, 2, ...), so we need to track the mapping
+    newton_world_to_env_id = {}
     for col, env_id in enumerate(env_ids.tolist()):
+        # begin a new world context (Newton assigns world ID = col)
+        scene.begin_world()
+        newton_world_to_env_id[col] = env_id
+
+        # add all active sources for this world
         for row in torch.nonzero(mapping[:, col], as_tuple=True)[0].tolist():
-            builder.add_world(
+            scene.add_builder(
                 protos[sources[row]],
                 xform=wp.transform(positions[col].tolist(), quaternions[col].tolist()),
-                # world=int(env_id),
             )
+
+        # end the world context
+        scene.end_world()
 
     # per-source, per-world renaming (strict prefix swap), compact style preserved
     for i, src_path in enumerate(sources):
         src_prefix_len = len(src_path.rstrip("/"))
         swap = lambda name, new_root: new_root + name[src_prefix_len:]  # noqa: E731
         world_cols = torch.nonzero(mapping[i], as_tuple=True)[0].tolist()
+        # Map Newton world IDs (sequential) to destination paths using env_ids
+        # world_roots = {c: destinations[i].format(int(env_ids[c])) for c in world_cols}
         world_roots = {int(env_ids[c]): destinations[i].format(int(env_ids[c])) for c in world_cols}
 
         for t in ("body", "joint", "shape", "articulation"):
-            keys, worlds_arr = getattr(builder, f"{t}_key"), getattr(builder, f"{t}_world")
+            keys, worlds_arr = getattr(scene, f"{t}_key"), getattr(scene, f"{t}_world")
             for k, w in enumerate(worlds_arr):
                 if w in world_roots and keys[k].startswith(src_path):
                     keys[k] = swap(keys[k], world_roots[w])
 
-    NewtonManager.set_builder(builder)
+    NewtonManager.set_builder(scene)
     NewtonManager._num_envs = mapping.size(1)
-    return builder, stage_info
+    return scene, stage_info
 
 
 def filter_collisions(

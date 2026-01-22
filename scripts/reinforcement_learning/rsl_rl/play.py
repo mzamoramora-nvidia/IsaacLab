@@ -34,6 +34,24 @@ parser.add_argument(
     help="Use the pre-trained checkpoint from Nucleus.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
+parser.add_argument(
+    "--newton-record",
+    action="store_true",
+    default=False,
+    help="Record Newton model/state to a ViewerFile during play.",
+)
+parser.add_argument(
+    "--newton-record-path",
+    type=str,
+    default=None,
+    help="Output path for Newton ViewerFile recording (default: logs/.../newton_recordings/<checkpoint>.bin).",
+)
+parser.add_argument(
+    "--newton-record-length",
+    type=int,
+    default=200,
+    help="Max number of steps to record with Newton ViewerFile (default: unlimited).",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -74,7 +92,7 @@ from isaaclab.envs import DirectRLEnvCfg, ManagerBasedRLEnvCfg
 from isaaclab.utils.assets import retrieve_file_path
 from isaaclab.utils.dict import print_dict
 
-from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper, export_policy_as_jit, export_policy_as_onnx
+from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper, export_policy_as_jit
 
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import get_checkpoint_path
@@ -120,6 +138,36 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg: RslRlBaseRun
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+
+    # setup Newton ViewerFile recording (optional)
+    newton_recorder = None
+    newton_record_steps = 0
+    newton_record_max_steps = None
+    sim_time = 0.0
+    if args_cli.newton_record:
+        try:
+            import newton
+            import warp as wp
+            print("[INFO] Warp version:", wp.__version__, "from", wp.__file__)
+            from isaaclab.sim._impl.newton_manager import NewtonManager
+        except Exception as exc:
+            print(f"[WARN] Newton recording requested but unavailable: {exc}")
+        else:
+            model = NewtonManager.get_model()
+            if model is None:
+                print("[WARN] Newton model not available. Is the task running on Newton?")
+            else:
+                record_path = args_cli.newton_record_path
+                if record_path is None:
+                    checkpoint_stem = os.path.splitext(os.path.basename(resume_path))[0]
+                    record_path = os.path.join(log_dir, "newton_recordings", f"{checkpoint_stem}_heterogeneous.bin")
+                os.makedirs(os.path.dirname(record_path), exist_ok=True)
+                newton_recorder = newton.viewer.ViewerFile(record_path, auto_save=False)
+                newton_recorder.set_model(model)
+                newton_record_max_steps = args_cli.newton_record_length
+                if newton_record_max_steps is None and args_cli.video:
+                    newton_record_max_steps = args_cli.video_length
+                print(f"[INFO] Newton recording to: {record_path}")
 
     # wrap for video recording
     if args_cli.video:
@@ -169,35 +217,46 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg: RslRlBaseRun
     # export policy to onnx/jit
     export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
     export_policy_as_jit(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.pt")
-    export_policy_as_onnx(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.onnx")
+    # export_policy_as_onnx(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.onnx")
 
     dt = env.unwrapped.step_dt
 
     # reset environment
     obs = env.get_observations()
     timestep = 0
-    # simulate environment
-    while is_simulation_running(simulation_app, env.unwrapped.sim):
-        start_time = time.time()
-        # run everything in inference mode
-        with torch.inference_mode():
-            # agent stepping
-            actions = policy(obs)
-            # env stepping
-            obs, _, _, _ = env.step(actions)
-        if args_cli.video:
-            timestep += 1
-            # Exit the play loop after recording one video
-            if timestep == args_cli.video_length:
-                break
+    try:
+        # simulate environment
+        while is_simulation_running(simulation_app, env.unwrapped.sim):
+            start_time = time.time()
+            # run everything in inference mode
+            with torch.inference_mode():
+                # agent stepping
+                actions = policy(obs)
+                # env stepping
+                obs, _, _, _ = env.step(actions)
+            if newton_recorder is not None:
+                newton_recorder.begin_frame(sim_time)
+                newton_recorder.log_state(NewtonManager.get_state_0())
+                newton_recorder.end_frame()
+                sim_time += dt
+                newton_record_steps += 1
+                if newton_record_max_steps is not None and newton_record_steps >= newton_record_max_steps:
+                    break
+            if args_cli.video:
+                timestep += 1
+                # Exit the play loop after recording one video
+                if timestep == args_cli.video_length:
+                    break
 
-        # time delay for real-time evaluation
-        sleep_time = dt - (time.time() - start_time)
-        if args_cli.real_time and sleep_time > 0:
-            time.sleep(sleep_time)
-
-    # close the simulator
-    env.close()
+            # time delay for real-time evaluation
+            sleep_time = dt - (time.time() - start_time)
+            if args_cli.real_time and sleep_time > 0:
+                time.sleep(sleep_time)
+    finally:
+        # close the simulator
+        env.close()
+        if newton_recorder is not None:
+            newton_recorder.close()
 
 
 if __name__ == "__main__":
