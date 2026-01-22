@@ -10,7 +10,7 @@ import numpy as np
 import re
 
 import warp as wp
-from newton import Axis, Contacts, Control, Model, ModelBuilder, State, eval_fk
+from newton import Axis, BroadPhaseMode, CollisionPipelineUnified, Contacts, Control, Model, ModelBuilder, State, eval_fk
 from newton.examples import create_collision_pipeline
 from newton.sensors import SensorContact as NewtonContactSensor
 from newton.sensors import populate_contacts
