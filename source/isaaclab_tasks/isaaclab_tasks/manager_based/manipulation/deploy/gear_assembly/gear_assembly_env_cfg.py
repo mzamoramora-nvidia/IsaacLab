@@ -317,7 +317,7 @@ class GearAssemblyEnvCfg(ManagerBasedRLEnvCfg):
             sdf_contact_margin=0.01,
             sdf_shape_patterns=[".*[Gg]ear.*", ".*pad.*", ".*driver.*", ".*follower.*", ".*coupler.*", ".*spring_link.*"],
             hydroelastic_cfg=HydroelasticCfg(
-                k_hydro=1e11, # 1e12 could also work.
+                k_hydro=1e12, # 1e11 also works but can result in larger penetration. See Max Penetration in Newton Visualizer.
                 shape_patterns=[".*[Gg]ear.*", ".*pad.*", ".*driver.*", ".*follower.*", ".*coupler.*", ".*spring_link.*"],
                 buffer_mult_iso=2,
             ),
