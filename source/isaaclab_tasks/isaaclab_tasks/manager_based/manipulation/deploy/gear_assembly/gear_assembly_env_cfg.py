@@ -309,15 +309,15 @@ class GearAssemblyEnvCfg(ManagerBasedRLEnvCfg):
                 use_mujoco_contacts=False,
                 save_to_mjcf="GearAssemblyEnv.xml",
             ),
-            num_substeps=2,
+            num_substeps=10,
             debug_mode=False,
             # SDF collision for gear meshes (fine-toothed concave geometry)
-            sdf_max_resolution=128,
+            sdf_max_resolution=256,
             sdf_narrow_band_range=(-0.01, 0.01),
             sdf_contact_margin=0.01,
             sdf_shape_patterns=[".*[Gg]ear.*", ".*pad.*", ".*driver.*", ".*follower.*", ".*coupler.*", ".*spring_link.*"],
             hydroelastic_cfg=HydroelasticCfg(
-                k_hydro=1e10,
+                k_hydro=1e11, # 1e12 could also work.
                 shape_patterns=[".*[Gg]ear.*", ".*pad.*", ".*driver.*", ".*follower.*", ".*coupler.*", ".*spring_link.*"],
                 buffer_mult_iso=2,
             ),

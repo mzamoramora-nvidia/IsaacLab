@@ -33,6 +33,9 @@ class NewtonViewerGL(ViewerGL):
         self._metadata = metadata or {}
         self._fallback_draw_controls = False
         self._update_frequency = update_frequency
+        self._max_penetration_depth = 0.0
+        self._max_penetration_depth_ever = 0.0
+        self._num_hydro_contacts = 0
 
         try:
             self.register_ui_callback(self._render_training_controls, position="side")
@@ -174,6 +177,29 @@ class NewtonViewerGL(ViewerGL):
                     show_com = self.show_com
                     changed, self.show_com = imgui.checkbox("Show Center of Mass", show_com)
 
+                    # Collision geometry visualization
+                    show_collision = self.show_collision
+                    changed, self.show_collision = imgui.checkbox("Show Collision", show_collision)
+
+                    # Visual geometry visualization
+                    show_visual = self.show_visual
+                    changed, self.show_visual = imgui.checkbox("Show Visual", show_visual)
+
+                    # Hydroelastic contact surface visualization
+                    show_hydro = self.show_hydro_contact_surface
+                    changed, self.show_hydro_contact_surface = imgui.checkbox(
+                        "Show Hydro Surface", show_hydro
+                    )
+
+                    # Hydroelastic contact stats
+                    if self._num_hydro_contacts > 0:
+                        imgui.separator()
+                        imgui.text(f"Hydro Contacts: {self._num_hydro_contacts}")
+                        depth_mm = self._max_penetration_depth * 1000.0
+                        imgui.text(f"Max Penetration: {depth_mm:.3f} mm")
+                        ever_mm = self._max_penetration_depth_ever * 1000.0
+                        imgui.text(f"Max Penetration (all time): {ever_mm:.3f} mm")
+
             # Rendering Options section
             imgui.set_next_item_open(True, imgui.Cond_.appearing)
             if imgui.collapsing_header("Rendering Options"):
@@ -238,6 +264,8 @@ class NewtonVisualizer(Visualizer):
         self._step_counter = 0
         self._model = None
         self._state = None
+        self._contacts = None
+        self._collision_pipeline = None
         self._update_frequency = cfg.update_frequency
         self._scene_data_provider = None
 
@@ -314,6 +342,16 @@ class NewtonVisualizer(Visualizer):
         self._viewer.show_contacts = self.cfg.show_contacts
         self._viewer.show_springs = self.cfg.show_springs
         self._viewer.show_com = self.cfg.show_com
+        self._viewer.show_collision = self.cfg.show_collision
+        self._viewer.show_visual = self.cfg.show_visual
+        self._viewer.show_hydro_contact_surface = self.cfg.show_hydro_contact_surface
+
+        # Fetch collision pipeline for hydroelastic contact surface visualization
+        if self._scene_data_provider:
+            self._collision_pipeline = self._scene_data_provider.get_collision_pipeline()
+        else:
+            with contextlib.suppress(AttributeError):
+                self._collision_pipeline = NewtonManager._collision_pipeline
 
         # Configure rendering options
         self._viewer.renderer.draw_shadows = self.cfg.enable_shadows
@@ -335,14 +373,19 @@ class NewtonVisualizer(Visualizer):
         self._sim_time += dt
         self._step_counter += 1
 
-        # Fetch updated state from scene data provider
+        # Fetch updated state and contacts from scene data provider
         if self._scene_data_provider:
             self._state = self._scene_data_provider.get_state()
+            self._contacts = self._scene_data_provider.get_contacts()
+            self._collision_pipeline = self._scene_data_provider.get_collision_pipeline()
         else:
             # Fallback: direct access to NewtonManager
             from isaaclab.sim._impl.newton_manager import NewtonManager
 
             self._state = NewtonManager._state_0
+            self._contacts = NewtonManager._contacts
+            with contextlib.suppress(AttributeError):
+                self._collision_pipeline = NewtonManager._collision_pipeline
 
         # Only update visualizer at the specified frequency
         update_frequency = self._viewer._update_frequency if self._viewer else self._update_frequency
@@ -354,6 +397,26 @@ class NewtonVisualizer(Visualizer):
                 self._viewer.begin_frame(self._sim_time)
                 if self._state is not None:
                     self._viewer.log_state(self._state)
+                    if self._contacts is not None:
+                        self._viewer.log_contacts(self._contacts, self._state)
+                    if self._collision_pipeline is not None:
+                        surface_data = self._collision_pipeline.get_hydro_contact_surface()
+                        self._viewer.log_hydro_contact_surface(surface_data, penetrating_only=True)
+                        # Compute max penetration depth from contact surface
+                        if surface_data is not None:
+                            num_contacts = int(surface_data.face_contact_count.numpy()[0])
+                            self._viewer._num_hydro_contacts = num_contacts
+                            if num_contacts > 0:
+                                depths = surface_data.contact_surface_depth.numpy()[:num_contacts]
+                                current_max = float(depths.min())
+                                self._viewer._max_penetration_depth = current_max
+                                if current_max < self._viewer._max_penetration_depth_ever:
+                                    self._viewer._max_penetration_depth_ever = current_max
+                            else:
+                                self._viewer._max_penetration_depth = 0.0
+                        else:
+                            self._viewer._max_penetration_depth = 0.0
+                            self._viewer._num_hydro_contacts = 0
                 self._viewer.end_frame()
             else:
                 self._viewer._update()

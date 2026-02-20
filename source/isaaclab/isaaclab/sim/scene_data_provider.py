@@ -116,6 +116,22 @@ class SceneDataProvider:
         except ImportError:
             return None
 
+    def get_contacts(self):
+        """Get contact data for Newton-based visualizers.
+
+        Returns:
+            Newton Contacts object, or None if not available.
+        """
+        if not self._has_newton_visualizer:
+            return None
+
+        try:
+            from isaaclab.sim._impl.newton_manager import NewtonManager
+
+            return NewtonManager._contacts
+        except ImportError:
+            return None
+
     def get_model(self) -> Model | None:
         """Get physics model for Newton-based visualizers.
 
@@ -132,6 +148,22 @@ class SceneDataProvider:
 
             return NewtonManager._model
         except ImportError:
+            return None
+
+    def get_collision_pipeline(self):
+        """Get collision pipeline for Newton-based visualizers.
+
+        Returns:
+            Newton collision pipeline object, or None if not available.
+        """
+        if not self._has_newton_visualizer:
+            return None
+
+        try:
+            from isaaclab.sim._impl.newton_manager import NewtonManager
+
+            return NewtonManager._collision_pipeline
+        except (ImportError, AttributeError):
             return None
 
     def _sync_fabric_transforms(self) -> None:

@@ -373,7 +373,7 @@ class NewtonManager:
         if hydro_cfg is not None:
             sdf_hydro_config = HydroelasticSDF.Config(
                 reduce_contacts=hydro_cfg.reduce_contacts,
-                output_contact_surface=hydro_cfg.output_contact_surface,
+                output_contact_surface=True,
                 normal_matching=hydro_cfg.normal_matching,
                 moment_matching=hydro_cfg.moment_matching,
                 margin_contact_area=hydro_cfg.margin_contact_area,

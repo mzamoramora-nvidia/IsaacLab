@@ -44,6 +44,15 @@ class NewtonVisualizerCfg(VisualizerCfg):
     show_com: bool = False
     """Show center of mass visualization."""
 
+    show_collision: bool = False
+    """Show collision geometry (SDF isomesh)."""
+
+    show_visual: bool = True
+    """Show visual geometry."""
+
+    show_hydro_contact_surface: bool = False
+    """Show hydroelastic contact surface wireframe."""
+
     enable_shadows: bool = True
     """Enable shadow rendering."""
 
