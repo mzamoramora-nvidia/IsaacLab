@@ -97,6 +97,27 @@ class NewtonCfg(PhysicsCfg):
     num_substeps: int = 1
     """Number of substeps to use for the solver."""
 
+    collide_substeps: int = 0
+    """How often to re-detect contacts inside the substep loop.
+
+    Each ``num_substeps`` solver step is an integration of size
+    ``physics_dt / num_substeps``. By default Newton runs collision
+    detection **once** before the substep loop and reuses that
+    contact set for every substep, which becomes increasingly stale
+    as bodies move during the step.
+
+    Resolution:
+
+    - ``0`` (default): legacy behaviour — collide once before the
+      substep loop. Cheapest; tolerable when ``num_substeps`` is
+      small or geometry moves slowly per step.
+    - ``N >= 1``: re-detect contacts every ``N`` substeps, i.e. on
+      substeps ``0, N, 2N, …``. ``collide_substeps=1`` matches the
+      panda-nut-bolt OSC example's contact density (re-detect every
+      substep) and is what stiff hydroelastic / penalty contacts
+      need to keep penetration bounded.
+    """
+
     debug_mode: bool = False
     """Whether to enable debug mode for the solver."""
 
