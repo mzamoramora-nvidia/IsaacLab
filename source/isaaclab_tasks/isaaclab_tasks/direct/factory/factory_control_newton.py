@@ -205,8 +205,7 @@ def compute_arm_jacobian(buffers: NewtonOSCBuffers) -> torch.Tensor:
     path is preserved as a fallback for builds that don't expose a
     fingertip body — but on Factory the fingertip joint is always
     present, and using it removes a ~7.5% relative-norm error caused
-    by the COM offset of the actual finger bodies (validated by the
-    finite-difference probe at ``scripts/probe_newton_jacobian_fd.py``).
+    by the COM offset of the actual finger bodies.
 
     Returns:
         ``(num_envs, 6, n_arm_dofs)`` torch tensor on the robot device,
@@ -362,7 +361,7 @@ class NewtonRobotIKSolver:
     that calls ``step_sim_no_action`` per iteration. On the Newton backend
     that drives the full multi-env scene through the captured CUDA graph
     plus several outside-graph kernels per iteration, and DLS observably
-    diverges (see ``scripts/probe_ik_convergence.py``).
+    diverges.
 
     This class replaces that loop with one call to :class:`newton.ik.IKSolver`,
     which:

@@ -35,8 +35,7 @@ def set_friction(asset, value, num_envs):
     On Newton, ``root_view`` does not expose ``get_material_properties`` /
     ``set_material_properties`` (those are PhysX TensorView APIs). We skip
     silently — the friction value declared in the spawn config / USD remains
-    in effect. Tuning runtime friction on Newton is tracked as a follow-up
-    in ``PLAN_NUT_THREAD_NEWTON.md``.
+    in effect.
     """
     if not hasattr(asset.root_view, "get_material_properties"):
         return
@@ -56,10 +55,7 @@ def set_body_inertias(robot, num_envs):
     ``get_inertias`` / ``set_inertias`` (those are PhysX TensorView APIs), so
     this is currently skipped. Newton's ``Model.joint_armature`` is **not** an
     automatic substitute: Factory's actuator cfg sets ``armature=0.0``, so
-    nothing populates ``joint_armature`` either. Closing this gap on Newton
-    (e.g. by writing a non-zero ``joint_armature`` slice or by applying the
-    same body-inertia bump via Newton's body-property API) is tracked as a
-    follow-up in ``PLAN_NUT_THREAD_NEWTON.md``.
+    nothing populates ``joint_armature`` either.
     """
     if not hasattr(robot.root_view, "get_inertias"):
         return
