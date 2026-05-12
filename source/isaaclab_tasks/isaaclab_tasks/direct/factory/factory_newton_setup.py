@@ -9,21 +9,16 @@ Two entry points:
 
 * :func:`register_model_init_callback` — registers a Newton ``MODEL_INIT``
   callback that runs *before* model finalization, where the
-  :class:`newton.ModelBuilder` is still mutable. This is where the
-  MuJoCo-Warp gravity-compensation custom attributes
-  (``mujoco:jnt_actgravcomp`` per DOF, ``mujoco:gravcomp`` per body) and
-  the joint armature have to be written, since they're consumed during
-  finalize. Called from :meth:`FactoryEnv._setup_scene`.
+  :class:`newton.ModelBuilder` is still mutable. Used to override the
+  joint target mode and ctrl-source on the Franka, filter the base ↔
+  table collision pair, retune the nut/bolt contact materials, and
+  build per-shape hydroelastic SDFs.
 
 * :func:`apply` — small post-finalization fix-ups that need the
-  finalized :class:`newton.Model` (for example refreshing the OSC
-  buffers' cached armature). Called from :meth:`FactoryEnv.__init__`
-  right after ``super().__init__()`` returns.
+  finalized :class:`newton.Model` (e.g. refreshing the OSC buffers'
+  cached armature).
 
 PhysX runs never import this module.
-
-Reference: panda-osc work in the Newton repo (commits ``06b3b087``,
-``1a67437b``) and the ``mzamora/newton-dev`` Factory branch.
 """
 
 from __future__ import annotations
@@ -31,7 +26,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import newton
-import warp as wp
 
 if TYPE_CHECKING:
     from .factory_env import FactoryEnv
@@ -61,19 +55,14 @@ _ARM_ARMATURE = (0.3, 0.3, 0.3, 0.3, 0.11, 0.11, 0.11)
 _FINGER_ARMATURE = 0.15
 
 
-def register_model_init_callback(env: FactoryEnv) -> None:
-    """Wire a Newton MODEL_INIT callback that mutates the builder.
-
-    Args:
-        env: The :class:`FactoryEnv`. The callback closes over ``env`` so it
-            can read the current ctrl-mode flag at fire time.
-    """
+def register_model_init_callback() -> None:
+    """Wire a Newton MODEL_INIT callback that mutates the builder."""
     from isaaclab_newton.physics import NewtonManager
 
     from isaaclab.physics import PhysicsEvent
 
     NewtonManager.register_callback(
-        lambda _ev: _model_init_callback(env), PhysicsEvent.MODEL_INIT, name="factory_newton_setup"
+        lambda _ev: _model_init_callback(), PhysicsEvent.MODEL_INIT, name="factory_newton_setup"
     )
 
 
@@ -95,7 +84,7 @@ def apply(env: FactoryEnv) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _model_init_callback(env: FactoryEnv) -> None:
+def _model_init_callback() -> None:
     """Body of the MODEL_INIT callback. Operates on the live builder."""
     from isaaclab_newton.physics import NewtonManager
 
@@ -105,8 +94,6 @@ def _model_init_callback(env: FactoryEnv) -> None:
 
     _set_joint_target_mode(builder)
     _set_ctrl_source_joint_target(builder)
-    _set_per_dof_gravity_compensation(builder)
-    _set_per_body_gravity_compensation(builder)
     _filter_base_table_contacts(builder)
     _tune_nut_bolt_contacts(builder)
     _build_collision_sdfs(builder)
@@ -209,26 +196,6 @@ def _set_ctrl_source_joint_target(builder) -> None:
             custom.values[dof_idx] = target_value
 
 
-def _set_per_dof_gravity_compensation(builder) -> None:
-    """Enable MuJoCo-Warp's per-DOF actuator gravcomp for the arm.
-
-    ``mujoco:jnt_actgravcomp`` is a custom attribute consumed by the
-    MuJoCo-Warp solver. When ``True`` for an actuator's joint, MJW adds
-    a feed-forward torque equal to the gravity load along that DOF —
-    that is, the OSC no longer has to fight gravity through task-space
-    PD, and torque-at-zero-error becomes ~zero. Without this, our
-    Jacobian-transpose OSC drifts the arm by hundreds of mm during
-    rollouts.
-    """
-    custom = builder.custom_attributes.get("mujoco:jnt_actgravcomp")
-    if custom is None:
-        return
-    if custom.values is None:
-        custom.values = {}
-    for dof_idx in _arm_dof_indices(builder):
-        custom.values[dof_idx] = True
-
-
 def _filter_base_table_contacts(builder) -> None:
     """Filter spurious robot-base ↔ table contacts.
 
@@ -310,23 +277,6 @@ def _tune_nut_bolt_contacts(builder) -> None:
             builder.shape_material_ke[i] = 1.0e4
             builder.shape_material_kd[i] = 100.0
             builder.shape_gap[i] = 0.0
-
-
-def _set_per_body_gravity_compensation(builder) -> None:
-    """Enable MuJoCo-Warp's per-body gravcomp on every Franka body.
-
-    The body-level ``mujoco:gravcomp`` attribute scales the gravity
-    contribution of each body's mass for actuator load computation
-    (1.0 = full compensation). Set on every parser-added robot body
-    so the per-DOF gravcomp above sees the right total mass.
-    """
-    custom = builder.custom_attributes.get("mujoco:gravcomp")
-    if custom is None:
-        return
-    if custom.values is None:
-        custom.values = {}
-    for body_idx in _robot_body_indices(builder):
-        custom.values[body_idx] = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -521,54 +471,3 @@ def _refresh_osc_buffers_armature(model, env: FactoryEnv) -> None:
     osc_buffers.arm_armature_torch.copy_(new_arm_armature)
 
 
-# ---------------------------------------------------------------------------
-# Deferred helpers (require per-shape SDF building before they're useful).
-# ---------------------------------------------------------------------------
-
-
-def _flag_robot_collisions_hydroelastic(model, env: FactoryEnv) -> None:
-    """Set the ``HYDROELASTIC`` bit on collision shapes belonging to the robot.
-
-    Newton's hydroelastic stack needs an actual :class:`newton.SDF`
-    built per shape to do anything useful; on its own the flag is a
-    no-op. Kept defined for the future SDF-build helper.
-    """
-    shape_labels = list(getattr(model, "shape_label", []) or [])
-    if not shape_labels:
-        return
-
-    shape_flags = model.shape_flags.numpy().copy()
-    collide_bit = int(newton.ShapeFlags.COLLIDE_SHAPES)
-    hydro_bit = int(newton.ShapeFlags.HYDROELASTIC)
-    for i, label in enumerate(shape_labels):
-        if "/Robot/" not in label:
-            continue
-        if (int(shape_flags[i]) & collide_bit) == 0:
-            continue
-        shape_flags[i] = int(shape_flags[i]) | hydro_bit
-
-    wp.copy(model.shape_flags, wp.array(shape_flags, dtype=model.shape_flags.dtype, device=model.device))
-
-
-def _set_robot_contact_gap(model, env: FactoryEnv, gap: float = 0.005) -> None:
-    """Set the per-shape contact gap on robot collision shapes.
-
-    Causes intermittent NaN observations when combined with the
-    triangle-mesh contact stack we currently use. Stays disabled
-    until SDF contacts are in place.
-    """
-    shape_labels = list(getattr(model, "shape_label", []) or [])
-    if not shape_labels:
-        return
-
-    shape_gap = model.shape_gap.numpy().copy()
-    collide_bit = int(newton.ShapeFlags.COLLIDE_SHAPES)
-    shape_flags = model.shape_flags.numpy()
-    for i, label in enumerate(shape_labels):
-        if "/Robot/" not in label:
-            continue
-        if (int(shape_flags[i]) & collide_bit) == 0:
-            continue
-        shape_gap[i] = gap
-
-    wp.copy(model.shape_gap, wp.array(shape_gap, dtype=model.shape_gap.dtype, device=model.device))

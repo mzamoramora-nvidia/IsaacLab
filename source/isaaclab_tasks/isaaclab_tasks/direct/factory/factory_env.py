@@ -444,7 +444,7 @@ class FactoryEnv(DirectRLEnv):
         if is_newton:
             from . import factory_newton_setup
 
-            factory_newton_setup.register_model_init_callback(self)
+            factory_newton_setup.register_model_init_callback()
 
     def _compute_fingertip_velocity_from_newton_state(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Read fingertip linear + angular velocity directly from mjwarp state.
