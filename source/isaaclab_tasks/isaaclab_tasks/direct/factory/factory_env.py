@@ -23,14 +23,10 @@ from .factory_env_cfg import OBS_DIM_CFG, STATE_DIM_CFG, FactoryEnvCfg
 def _newton_rigid_object_cfg(art_cfg: ArticulationCfg, kinematic: bool) -> RigidObjectCfg:
     """Adapt a joint-less Factory ArticulationCfg into a RigidObjectCfg for Newton.
 
-    Mirrors the pattern Dexsuite (the canonical Newton-ready manipulation env)
-    uses for its joint-less assets: wrap as :class:`RigidObjectCfg`, mark static
-    targets ``kinematic_enabled=True`` (Dexsuite's table), leave manipulated
-    objects dynamic (Dexsuite's cube).
-
-    The resulting cfg has ``class_type = RigidObject``, so
-    ``cfg.class_type(cfg)`` constructs the right wrapper at scene-setup time.
-    PhysX is unaffected: it keeps using the original ArticulationCfg.
+    Wraps the asset as :class:`RigidObjectCfg`, marks static targets
+    ``kinematic_enabled=True``, and leaves manipulated objects dynamic. The
+    resulting cfg has ``class_type = RigidObject``, so ``cfg.class_type(cfg)``
+    constructs the right wrapper at scene-setup time. PhysX is unaffected.
     """
     rigid_props = art_cfg.spawn.rigid_props
     if kinematic:
@@ -109,21 +105,16 @@ class FactoryEnv(DirectRLEnv):
         self.cfg_task = cfg.task
 
         # Newton path: wrap joint-less Factory assets as :class:`RigidObjectCfg`
-        # with ``kinematic_enabled=True`` for static targets (Dexsuite pattern),
-        # raise the physics rate, disable the OSC null-space term, and align
-        # static-asset poses to the cuboid table top. PhysX path is untouched.
+        # with ``kinematic_enabled=True`` for static targets, raise the physics
+        # rate, disable the OSC null-space term, and align static-asset poses
+        # to the cuboid table top. PhysX path is untouched.
         if _is_newton_backend(cfg):
-            # Newton runs the physics solver at 240 Hz (vs 120 Hz on PhysX) with
-            # ``decimation = 16`` so the effective control rate stays at 15 Hz.
-            # Smaller physics_dt = fresher contact set each step for stiff
-            # hydroelastic threading. PhysX defaults (``dt = 1/120``,
-            # ``decimation = 8``) are preserved by the shared
-            # ``FactoryEnvCfg.sim`` / ``FactoryEnvCfg.decimation``.
+            # 240 Hz physics × 16 decimation → 15 Hz control. Smaller physics_dt
+            # keeps the contact set fresh for stiff hydroelastic threading.
             cfg.sim.dt = 1.0 / 240.0
             cfg.decimation = 16
 
-            # Disable the OSC null-space term on Newton (see ``CtrlCfg``);
-            # PhysX defaults are unchanged.
+            # Disable the OSC null-space term on Newton (see ``CtrlCfg``).
             cfg.ctrl.disable_nullspace = True
 
             kinematic_for = {"fixed_asset", "small_gear_cfg", "large_gear_cfg"}
@@ -152,37 +143,25 @@ class FactoryEnv(DirectRLEnv):
                 cur_pos = bolt.init_state.pos
                 new_init = bolt.init_state.replace(pos=(float(cur_pos[0]), float(cur_pos[1]), 0.0))
                 self.cfg_task.fixed_asset = bolt.replace(init_state=new_init)
-            # Bump arm actuator armature *before* ``super().__init__`` so the
-            # ImplicitActuatorCfg values get baked into ``model.joint_armature``
-            # at finalize time (otherwise the builder's per-DOF armature falls
-            # back to 0.0). Armature stabilises the OSC's
-            # ``Lambda = (J H^-1 J^T)^-1`` and damps wrist chatter.
+            # Armature must be set before super().__init__ so finalize bakes
+            # it into model.joint_armature; stabilises OSC Lambda.
             arm_actuators = cfg.robot.actuators
             arm_actuators["panda_arm1"].armature = 0.3
             arm_actuators["panda_arm2"].armature = 0.11
             arm_actuators["panda_hand"].armature = 0.15
 
-            # ``kd = 0`` on the arm: with arm DOFs in POSITION mode + ke=0,
-            # mjwarp applies ``-kd * qd``. The OSC's own ``Kd = 2√Kp`` plus
-            # the armature already damp the redundant 7th DOF; adding more
-            # kd brakes OSC tracking (PhysX +48 mm vs Newton +12 mm step
-            # response at kd=10).
+            # kd=0: OSC Kd=2√Kp + armature already damp the 7th DOF; extra kd
+            # brakes OSC tracking (kd=10 → +12 mm step error vs PhysX +48 mm).
             arm_actuators["panda_arm1"].damping = 0.0
             arm_actuators["panda_arm2"].damping = 0.0
 
-            # Finger PD = (1000, 10), softer than Factory's PhysX default
-            # of (7500, 173). With hydroelastic SDFs on, grip force is
-            # set by ``shape_material_kh × penetration`` rather than the
-            # PD spring; the stiff PhysX gains over-drive the SDFs into
-            # the nut.
+            # Softer finger PD than PhysX default (7500, 173): with hydroelastic
+            # SDFs grip force comes from kh × penetration, not the PD spring.
             arm_actuators["panda_hand"].stiffness = 1000.0
             arm_actuators["panda_hand"].damping = 10.0
 
-            # Skip the cloner's per-prototype convex-hull mesh approximation
-            # so the SDFs we build later in ``factory_newton_setup`` retain
-            # nut/bolt thread + hex features. Monkey-patched so the
-            # ``InteractiveScene`` constructed inside ``super().__init__``
-            # picks up the override.
+            # Skip convex-hull simplification so nut/bolt thread + hex SDFs
+            # survive cloning.
             from isaaclab_newton.cloner import newton_replicate as _nr
 
             _orig_replicate = _nr.newton_physics_replicate
@@ -209,10 +188,7 @@ class FactoryEnv(DirectRLEnv):
 
         super().__init__(cfg, render_mode, **kwargs)
 
-        # Newton-only post-load asset setup (POSITION-mode override on the
-        # arm DOFs, hydroelastic flag on robot collision shapes, contact-gap
-        # tuning, etc.). Runs *after* ``super().__init__`` so the Newton
-        # model is finalized; PhysX never imports this module.
+        # Newton-only post-load asset setup. PhysX never imports this module.
         if _is_newton_backend(self.cfg):
             from . import factory_newton_setup
 
@@ -222,16 +198,8 @@ class FactoryEnv(DirectRLEnv):
         self._init_tensors()
         self._set_default_dynamics_parameters()
 
-        # Newton-only kernel warm-up. Factory's reset path includes a 30-step
-        # IK loop in ``set_pos_inverse_kinematics`` whose per-iteration call
-        # to ``step_sim_no_action`` (write_data_to_sim → sim.step →
-        # scene.update → _compute_intermediate_values) bypasses the captured
-        # CUDA graph. Each first-time invocation JIT-compiles a Newton kernel
-        # (``eval_fk``, the actuator-model kernels, ``eval_jacobian`` and
-        # ``eval_mass_matrix`` via ``factory_control_newton`` on the OSC
-        # tail) — these take 10-30 s each on Factory's FR3+nut+bolt scene.
-        # Pre-pay that cost here on a couple of dummy steps so the 30 IK
-        # iterations all hit warm caches. PhysX is unaffected.
+        # Warm up Newton kernels (eval_fk, actuator, eval_jacobian/mass_matrix)
+        # so the 30-step reset IK loop hits warm caches.
         if _is_newton_backend(self.cfg):
             for _ in range(2):
                 self.step_sim_no_action()
@@ -299,35 +267,13 @@ class FactoryEnv(DirectRLEnv):
         """Initialize simulation scene."""
         spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg(), translation=(0.0, 0.0, -1.05))
 
-        # Spawn the Seattle-lab table. On PhysX we drop in the USD as a plain
-        # static prim — the existing path. On Newton we wrap it as a
-        # kinematic-enabled :class:`RigidObject` so that:
-        #   * it shows up as a body in ``model.body_label`` (the Newton viewer
-        #     only renders shapes that belong to a body, so a world-static
-        #     UsdFileCfg-spawned table appears nowhere and the bolt looks like
-        #     it is floating);
-        #   * the bolt / nut / robot collide against a single articulated
-        #     ground-truth body, matching the Dexsuite pattern.
-        # PhysX behaviour is unchanged because ``_setup_scene`` is the only
-        # caller and we keep the ``cfg.func`` branch verbatim there.
+        # Newton: spawn a thin kinematic cuboid the size of the table top.
+        # The instanceable Seattle-lab-table USD has no
+        # ``UsdPhysics.RigidBodyAPI`` on its root so it can't be wrapped as a
+        # ``RigidObjectCfg`` directly. ``MeshCuboidCfg`` (not ``CuboidCfg``) so
+        # ``_build_collision_sdfs`` can bake a voxel SDF for "Show Collision".
+        # Top surface at z=0; bolt init_state.pos.z is remapped to match.
         if _is_newton_backend(self.cfg):
-            # The instanceable Seattle-lab-table USD has no ``UsdPhysics.RigidBodyAPI``
-            # on its root, so wrapping it in a :class:`RigidObjectCfg` errors out at
-            # initialize-time. Match the Dexsuite pattern instead and spawn a thin
-            # kinematic-enabled cuboid the size of the table top — enough for the
-            # Newton viewer to render a visible body and for the bolt / nut to sit
-            # on a real collider. Top surface aligned to **z=0.0** to match the
-            # original USD table-top height; we also remap the bolt's
-            # ``init_state.pos.z`` to 0.0 in :meth:`__init__` so the bolt sits
-            # flush on the table without a 5 cm "floor under the floor" lifting
-            # the table into the panda base. 4 cm thick → cuboid centre at
-            # z = 0.0 - 0.02 = -0.02.
-            # ``MeshCuboidCfg`` (not ``CuboidCfg``) — analytical boxes
-            # use Newton's exact box SDF for narrow-phase but produce no
-            # voxel-grid SDF for the viewer's "Show Collision" overlay,
-            # so the table was invisible under that toggle. A mesh box
-            # gets picked up by ``_build_collision_sdfs`` and baked into
-            # a voxel SDF, matching the panda / nut / bolt path.
             table_cfg = RigidObjectCfg(
                 prim_path="/World/envs/env_.*/Table",
                 spawn=sim_utils.MeshCuboidCfg(
@@ -385,11 +331,8 @@ class FactoryEnv(DirectRLEnv):
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
-        # Newton-only: register the MODEL_INIT callback that sets per-DOF /
-        # per-body MuJoCo gravity-compensation custom attributes and the
-        # Franka armature. This MUST happen *before* model finalization,
-        # which is why we register here (during ``_setup_scene``) rather
-        # than calling a function in ``__init__`` after ``super().__init__``.
+        # Register Newton's MODEL_INIT callback here (before model finalization)
+        # rather than in __init__ after super().__init__.
         if is_newton:
             from . import factory_newton_setup
 
@@ -514,12 +457,8 @@ class FactoryEnv(DirectRLEnv):
         )
         self.fingertip_midpoint_quat = self._robot.data.body_quat_w.torch[:, self.fingertip_body_idx]
         if self._newton_osc_buffers is not None:
-            # The IsaacLab Newton data adapter returns 0 for both
-            # ``body_lin_vel_w`` (COM frame) and ``body_link_lin_vel_w``
-            # (transport-corrected) on ``panda_fingertip_centered`` -- a
-            # zero-mass virtual body. mjwarp ``state.body_qd`` does have
-            # the real velocity for that body, so we read it directly and
-            # apply the transport ourselves.
+            # Newton: data adapter zeros fingertip vel (zero-mass virtual body);
+            # read body_qd directly and apply the COM->link transport.
             self.fingertip_midpoint_linvel, self.fingertip_midpoint_angvel = (
                 self._compute_fingertip_velocity_from_newton_state()
             )
@@ -528,15 +467,8 @@ class FactoryEnv(DirectRLEnv):
             self.fingertip_midpoint_angvel = self._robot.data.body_ang_vel_w.torch[:, self.fingertip_body_idx]
 
         if self._newton_osc_buffers is not None:
-            # Newton path: build the arm Jacobian ourselves from FK rather
-            # than reading Newton's ``eval_jacobian`` output. ``eval_jacobian``
-            # writes per-joint Jacobians at each child body's COM in world
-            # frame; the OSC and ``fingertip_midpoint_pos`` both want a
-            # body-origin Jacobian. The cross-product formulation
-            # ``J_lin = z_axis × (p_finger - p_joint)`` gives exactly that
-            # for a chain of revolute joints. Mass matrix still comes from
-            # ``factory_control_newton`` (and absorbs the joint_armature
-            # diagonal patch).
+            # Newton: build the arm Jacobian from FK (eval_jacobian uses
+            # child-COM frame; the OSC wants body-origin).
             from . import factory_control_newton
 
             self.fingertip_midpoint_jacobian = self._compute_fk_arm_jacobian()
