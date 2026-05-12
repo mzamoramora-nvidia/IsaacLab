@@ -121,51 +121,26 @@ class FactoryPhysicsCfg(PresetCfg):
             integrator="implicitfast",
             njmax=4000,
             nconmax=4000,
-            # ``impratio`` controls friction-vs-normal-impedance coupling.
-            # panda-nut-bolt's grip experiment found that anything ≥10
-            # in this scene over-constrains gripper-vs-nut friction
-            # enough that the fingers can't finish their close (pads
-            # can't slide along the nut surface during approach). Drop
-            # to 10 to match that result. Was 1000 (inherited from
-            # ``mzamora/newton-dev`` for an OSC-only setup without
-            # hydroelastic).
+            # impratio=10 keeps gripper-vs-nut friction loose enough for the
+            # fingers to close on the nut; higher values over-constrain the pad
+            # against the nut surface.
             impratio=10.0,
             cone="elliptic",
+            # Route hydroelastic contacts through MuJoCo so anchor_contact /
+            # moment_matching engage; the static value here is overridden by
+            # FactoryEnv.__init__ scaling rigid_contact_max with num_envs.
             use_mujoco_contacts=False,
             iterations=10,
             ls_iterations=100,
         ),
-        # SDF + hydroelastic contact pipeline. Required when
-        # ``use_mujoco_contacts=False`` — without an explicit collision
-        # cfg, Newton's defaults skip the hydroelastic config entirely
-        # and the per-shape ``HYDROELASTIC`` flag + ``shape_material_kh``
-        # we set in ``factory_newton_setup._build_collision_sdfs`` go
-        # unused.
-        # ``anchor_contact=True`` + ``moment_matching=True`` are PhysX
-        # patch-friction analogs (preserve friction torque per normal
-        # bin under contact reduction) — without them the nut spins
-        # out under any asymmetric finger pinch.
-        # ``output_contact_surface=True`` populates the visualisation
-        # data that the viewer's "Show Collision" toggle renders, so
-        # the SDFs become visible.
         collision_cfg=NewtonCollisionPipelineCfg(
             broad_phase="explicit",
-            # ``rigid_contact_max`` is overridden in
-            # :meth:`FactoryEnv.__init__` to ``njmax × num_envs`` so the
-            # buffer scales with the world count (panda-nut-bolt's
-            # 1-env baseline is njmax=2000 / rigid_contact_max=2048).
-            # This static value is just a fallback for cases where the
-            # override path doesn't fire (e.g. someone constructs the
-            # cfg without running through ``FactoryEnv``).
             rigid_contact_max=32768,
             sdf_hydroelastic_config=HydroelasticSDFCfg(
+                # PhysX patch-friction analogs — preserve force + torque balance
+                # per normal bin under contact reduction so the nut doesn't spin
+                # out under asymmetric finger pinch.
                 anchor_contact=True,
-                # ``moment_matching`` is the PhysX patch-friction analog —
-                # without it the nut spins out under any asymmetric
-                # finger pinch (see panda-nut-bolt commit ``e16ac397``).
-                # ``normal_matching`` (default True) plus
-                # ``moment_matching`` together preserve both force and
-                # torque balance per normal bin under contact reduction.
                 moment_matching=True,
                 output_contact_surface=False,
             ),

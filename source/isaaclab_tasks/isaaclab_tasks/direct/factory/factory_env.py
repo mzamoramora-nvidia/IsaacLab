@@ -108,23 +108,10 @@ class FactoryEnv(DirectRLEnv):
         cfg.state_space += cfg.action_space
         self.cfg_task = cfg.task
 
-        # Newton-side Factory uses Dexsuite's pattern for joint-less assets:
-        # wrap them as :class:`RigidObjectCfg` (not :class:`ArticulationCfg`),
-        # with ``kinematic_enabled=True`` for static targets (the bolt — the
-        # nut threads onto it; it doesn't move). Dynamic objects (the nut)
-        # stay non-kinematic. Then ``cfg.class_type(cfg)`` in _setup_scene
-        # picks the right wrapper. PhysX uses the original ArticulationCfg.
-        #
-        # NOTE: setting ``kinematic=False`` for the fixed_asset would not
-        # actually let the bolt fall — the Factory bolt USD authors a
-        # ``PhysicsFixedJoint`` from world to root, which Newton's parser
-        # honours regardless of our ``kinematic_enabled`` toggle. (Verified
-        # via ``probe_newton_bolt_drop.py``: bolt's incoming joint type is
-        # FIXED, body_inv_mass>0 but gravity has no effect since the joint
-        # has no DOFs.) Same convention as panda-nut-bolt-osc, which
-        # explicitly sets ``floating=False`` for the bolt. So we keep the
-        # bolt kinematic, and align the cuboid table top to the bolt's
-        # default z=0.05 (in ``_setup_scene``) so it sits flush.
+        # Newton path: wrap joint-less Factory assets as :class:`RigidObjectCfg`
+        # with ``kinematic_enabled=True`` for static targets (Dexsuite pattern),
+        # raise the physics rate, disable the OSC null-space term, and align
+        # static-asset poses to the cuboid table top. PhysX path is untouched.
         if _is_newton_backend(cfg):
             # Newton runs the physics solver at 240 Hz (vs 120 Hz on PhysX) with
             # ``decimation = 16`` so the effective control rate stays at 15 Hz.
@@ -151,32 +138,17 @@ class FactoryEnv(DirectRLEnv):
                         _newton_rigid_object_cfg(asset_cfg, kinematic=asset_attr in kinematic_for),
                     )
 
-            # Zero the Z component of the bolt's reset randomisation. The
-            # default ``fixed_asset_init_pos_noise = [0.05, 0.05, 0.05]``
-            # pushes the bolt's z uniformly into ``[0.0, 0.10]`` — and
-            # because the bolt is parsed as a fixed (welded) body via its
-            # USD ``PhysicsFixedJoint`` (verified in
-            # ``probe_newton_bolt_drop.py``: bolt joint type = FIXED), it
-            # *stays* wherever the reset places it. Without the z-zero
-            # the bolt visibly intersects the table on half the random
-            # samples and floats above it on the other half. XY
-            # randomisation is preserved. Same convention as the
-            # panda-nut-bolt OSC reference (no Z-noise on the bolt).
+            # Zero the bolt reset's Z noise: the bolt is a kinematic body
+            # (USD PhysicsFixedJoint) so it sticks wherever the reset places
+            # it; non-zero z-noise causes it to clip into / float above the
+            # table.
             noise = getattr(self.cfg_task, "fixed_asset_init_pos_noise", None)
             if noise is not None and len(noise) >= 3:
                 self.cfg_task.fixed_asset_init_pos_noise = list(noise[:2]) + [0.0]
 
-            # Drop the bolt's default ``init_state.pos.z`` from the
-            # Factory cfg's 0.05 (chosen to match the original
-            # ``table_instanceable.usd`` top height in PhysX) to 0.0,
-            # which is the top of our Newton cuboid table at
-            # ``pos=(0.55, 0.0, -0.02), size_z=0.04``. Keeping the
-            # cuboid at z=-0.02 (its original position) avoids lifting
-            # it into the panda base; remapping the bolt to z=0.0
-            # keeps it flush on that table top instead of floating
-            # 5 cm above. The held_asset (nut) goes to the gripper
-            # TCP via the reset's grasp-settle phase, so its init_state
-            # pose is not used at runtime — leave it untouched.
+            # Bolt init z=0.0 matches the Newton cuboid table top
+            # (at z = -0.02, thickness 0.04); the Factory default of 0.05
+            # was chosen for PhysX's ``table_instanceable.usd``.
             bolt = getattr(self.cfg_task, "fixed_asset", None)
             if bolt is not None and hasattr(bolt, "init_state") and hasattr(bolt.init_state, "pos"):
                 cur_pos = bolt.init_state.pos
@@ -193,53 +165,27 @@ class FactoryEnv(DirectRLEnv):
             arm_actuators["panda_arm2"].armature = 0.11
             arm_actuators["panda_hand"].armature = 0.15
 
-            # Arm joint damping. With ``factory_newton_setup`` flipping
-            # the arm into POSITION mode + ke=0, mjwarp applies a per-joint
-            # ``-kd * qd`` damping term.
-            #
-            # We previously used ``kd=10`` matching
-            # ``example_robot_panda_nut_bolt_osc.py:1249``, but that's a
-            # standalone-robot setting; in the Factory env (held nut +
-            # stiff grasp contacts) it acts as a 4× brake on OSC tracking
-            # — a +x action that PhysX tracks to +48 mm in 20 ticks only
-            # reaches +12 mm on Newton with kd=10. Empirically (probe
-            # tracking sweep with the correct ``JOINT_DOF_PROPERTIES``
-            # notify flag), ``kd=0`` restores tracking to +46 mm AND
-            # tightens R0 hold drift from ~7 mm to ~1 mm — the OSC's own
-            # ``Kd = 2√Kp`` plus the arm's armature already provide
-            # sufficient damping.
+            # ``kd = 0`` on the arm: with arm DOFs in POSITION mode + ke=0,
+            # mjwarp applies ``-kd * qd``. The OSC's own ``Kd = 2√Kp`` plus
+            # the armature already damp the redundant 7th DOF; adding more
+            # kd brakes OSC tracking (PhysX +48 mm vs Newton +12 mm step
+            # response at kd=10).
             arm_actuators["panda_arm1"].damping = 0.0
             arm_actuators["panda_arm2"].damping = 0.0
 
-            # Finger PD gains. Factory's PhysX defaults are 7500 / 173
-            # (very stiff close, designed to clamp the nut hard before
-            # the policy takes over). panda-nut-bolt-osc uses the much
-            # softer 100 / 10 — gentler close, equilibrium grip force
-            # determined by ``shape_material_kh`` * penetration rather
-            # than PD * spring. With our hydroelastic stack now wired
-            # in, the softer gains are appropriate; the stiff gains
-            # were over-driving the SDFs into the nut surface.
+            # Finger PD = (1000, 10), softer than Factory's PhysX default
+            # of (7500, 173). With hydroelastic SDFs on, grip force is
+            # set by ``shape_material_kh × penetration`` rather than the
+            # PD spring; the stiff PhysX gains over-drive the SDFs into
+            # the nut.
             arm_actuators["panda_hand"].stiffness = 1000.0
             arm_actuators["panda_hand"].damping = 10.0
 
-            # Disable IsaacLab's per-prototype convex-hull mesh
-            # approximation. The cloner runs ``approximate_meshes(
-            # "convex_hull", ...)`` on every spawned prototype right
-            # after USD parsing, replacing each finger / nut / bolt
-            # collision mesh with its convex hull. For threaded
-            # geometry (M16 hex flats + screw threads) the convex hull
-            # is essentially a smooth shell — the SDFs we build on top
-            # in ``factory_newton_setup._build_collision_sdfs`` are
-            # built on that smoothed-out mesh, so:
-            #   * Show Collision in the viewer renders nothing useful.
-            #   * Hydroelastic contacts can't engage hex faces or
-            #     thread features — gripper just slips on the convex
-            #     proxy.
-            # Match panda-nut-bolt's setup by skipping the convex-hull
-            # pass. We monkey-patch the cloner export so InteractiveScene
-            # (constructed inside ``super().__init__``) picks up the
-            # patched callable. Keyed off ``_is_newton_backend`` so
-            # PhysX runs are unaffected.
+            # Skip the cloner's per-prototype convex-hull mesh approximation
+            # so the SDFs we build later in ``factory_newton_setup`` retain
+            # nut/bolt thread + hex features. Monkey-patched so the
+            # ``InteractiveScene`` constructed inside ``super().__init__``
+            # picks up the override.
             from isaaclab_newton.cloner import newton_replicate as _nr
 
             _orig_replicate = _nr.newton_physics_replicate
@@ -253,17 +199,8 @@ class FactoryEnv(DirectRLEnv):
 
             _isaaclab_newton_cloner.newton_physics_replicate = _factory_no_convex_hull_replicate
 
-            # Scale the hydroelastic contact buffer with the number of
-            # worlds. Newton's ``CollisionPipeline`` allocates one
-            # ``rigid_contact_max``-sized buffer covering every world;
-            # panda-nut-bolt's 1-env setup uses 2048 with njmax=2000
-            # (ratio ≈ njmax × world_count). Below that, the buffer
-            # overflows during gripper close — visible as
-            # ``rigid contact output overflow: N > rigid_contact_max``
-            # warnings plus visible interpenetration. Sizing it
-            # dynamically here means the default works as the user
-            # bumps ``cfg.scene.num_envs`` for training without having
-            # to re-tune the buffer by hand.
+            # Scale the contact buffer with num_envs so the gripper close
+            # doesn't overflow when the user bumps the world count.
             if (
                 getattr(cfg.sim.physics, "collision_cfg", None) is not None
                 and getattr(cfg.sim.physics, "solver_cfg", None) is not None
@@ -1341,19 +1278,9 @@ class FactoryEnv(DirectRLEnv):
         self.task_prop_gains = self.default_gains
         self.task_deriv_gains = factory_utils.get_deriv_gains(self.default_gains)
 
-        # Restore gravity (PhysX/Newton-portable).
-        # On Newton, keep global gravity at zero post-reset to replicate
-        # PhysX's per-body ``disable_gravity=True`` regime. Every dynamic
-        # body in our Factory scene has ``disable_gravity=True`` under
-        # PhysX (robot in :class:`FactoryEnvCfg.robot.spawn.rigid_props`,
-        # held nut in :class:`factory_tasks_cfg.FactoryTask.held_asset`).
-        # Newton's IsaacLab adapter doesn't honour per-body
-        # ``disable_gravity``, so leaving gravity on causes the held
-        # nut to fall at ~g, pull the gripper down via grip friction, and
-        # produce ~10 mm TCP drift during R0 hold (probe_zero_gravity_drift
-        # showed drift 9.28 mm with gravity on, 0.015 mm with gravity off).
-        # With gravity off, gravcomp on the robot ``-m·g·factor = 0`` —
-        # the OSC has no gravity load to compensate, matching PhysX exactly.
+        # Restore gravity (PhysX). Newton's adapter doesn't honour the
+        # per-body ``disable_gravity=True`` flags set on the robot / held nut,
+        # so keep global gravity at zero post-reset to match PhysX behaviour.
         if _is_newton_backend(self.cfg):
             _set_sim_gravity(self.cfg, (0.0, 0.0, 0.0))
         else:

@@ -37,23 +37,12 @@ _ARM_DOF_COUNT = 7
 
 _ARM_JOINT_NAMES = [f"panda_joint{i}" for i in range(1, 8)]
 _FINGER_JOINT_NAMES = ["panda_finger_joint1", "panda_finger_joint2"]
-# Path-prefix used to identify every body that belongs to the Franka
-# articulation in IsaacLab's USD layout (``/World/envs/env_*/Robot/...``).
-# Path-based matching is more robust than a hand-curated name list —
-# panda-nut-bolt-osc brackets ``builder.body_count`` across the
-# ``builder.add_usd(...)`` call to grab everything the parser added,
-# but in IsaacLab we run from the MODEL_INIT callback after the cloner
-# has already replicated the prototype N times, so we can't use the
-# count-bracket trick. Matching on ``/Robot/`` substring catches every
-# body the Robot articulation contributed (links, hand, fingers, force
-# sensor, fingertip-centered virtual frame, plus any camera mount /
-# tool the user might attach later) without us having to maintain an
-# explicit list and risk missing one.
+# Substring matched against ``builder.body_label`` to find every body
+# belonging to the Franka under the IsaacLab USD layout.
 _ROBOT_BODY_PATH_SUBSTR = "/Robot/"
 
-# Arm DOF armature [kg·m²]. Higher armature stabilises the OSC's
-# ``Lambda = (J H^-1 J^T)^-1`` and damps high-frequency torque on the
-# wrist joints. Numbers from the panda-osc reference / mzamora/newton-dev.
+# Arm DOF armature [kg·m²]; stabilises the OSC ``Lambda`` and damps wrist
+# chatter. Values lifted from the panda-osc reference / mzamora/newton-dev.
 _ARM_ARMATURE = (0.3, 0.3, 0.3, 0.3, 0.11, 0.11, 0.11)
 _FINGER_ARMATURE = 0.15
 
@@ -148,16 +137,7 @@ def _finger_dof_indices(builder) -> list[int]:
 
 
 def _robot_body_indices(builder) -> list[int]:
-    """Indices into ``builder.body_label`` that belong to the Franka.
-
-    Matched by USD prim-path substring (``/Robot/``) — the IsaacLab
-    convention for the robot articulation hierarchy. Catches every
-    body under the articulation regardless of whether it's an arm
-    link, the gripper, the fingertip-centered virtual frame, the
-    force sensor, or any camera/tool the user might add later.
-    Equivalent in spirit to panda-nut-bolt-osc's body-count bracket
-    around ``builder.add_usd(...)``.
-    """
+    """Indices into ``builder.body_label`` that belong to the Franka."""
     return [i for i, label in enumerate(builder.body_label) if _ROBOT_BODY_PATH_SUBSTR in label]
 
 
@@ -237,34 +217,13 @@ def _filter_base_table_contacts(builder) -> None:
 
 
 def _tune_nut_bolt_contacts(builder) -> None:
-    """Apply panda-osc / mzamora/newton-dev contact-material tuning.
+    """Stiffen contact-material gains on every nut/bolt collision shape.
 
-    The Factory NutThread task is contact-rich: the gripper has to
-    close around the nut without the nut squirting out, then the nut
-    has to slide down the bolt threads on contact. Newton's parser
-    uses default low-stiffness contact materials that produce
-    "trampoline" behaviour when the gripper closes — the nut bounces
-    out of the gripper. Override the per-shape material gains on
-    every nut/bolt collision shape:
-
-    * ``shape_material_mu`` — friction. ``0.2`` on the **nut**, ``0.5``
-      on the **bolt**. mjwarp combines pair friction as ``max(mu_a, mu_b)``,
-      so with finger ``mu ≈ 1.0`` the effective frictions are:
-        - nut↔bolt   = max(0.2, 0.5) = 0.5  (stiction on threads)
-        - nut↔finger = max(0.2, 1.0) = 1.0  (strong grip)
-        - bolt↔finger = max(0.5, 1.0) = 1.0
-      The nut was previously at ``0.0`` for the same effective frictions
-      (max() picks the larger operand) but mjwarp emits a warning at
-      startup — ``geom N: friction[0] (0.0) < MJ_MINMU (1e-05) with
-      condim=3 may cause NaN`` — when any shape has ``mu < 1e-5``.
-      Bumping to ``0.2`` (matches the panda-nut-bolt OSC reference) kills
-      the warning without changing any pair-friction outcome.
-    * ``shape_material_ke`` / ``kd`` — normal stiffness / damping
-      (1e4 / 100). 1-2 orders of magnitude stiffer than the parser
-      default; needed for the gripper-close to produce a stable
-      grip rather than a soft squish.
-    * ``shape_gap = 0.0`` — no contact margin so the nut sits on
-      the bolt at the right height.
+    Newton's parser defaults are too soft for the threading task: the gripper
+    bounces off the nut. ``ke``/``kd`` lift normal stiffness/damping ~1-2 orders
+    of magnitude; ``mu`` lands on values that combine via mjwarp's pair
+    ``max(mu_a, mu_b)`` rule into the panda-nut-bolt OSC reference's effective
+    frictions while staying above ``MJ_MINMU`` to silence the NaN-risk warning.
     """
     if not all(hasattr(builder, attr) for attr in ("shape_label", "shape_material_mu", "shape_gap")):
         return
@@ -283,31 +242,13 @@ def _tune_nut_bolt_contacts(builder) -> None:
 
 
 # ---------------------------------------------------------------------------
-# SDF / hydroelastic collision setup
+# SDF / hydroelastic collision setup. Mirrors the panda-nut-bolt OSC reference:
+#   * fingers — 192-cube SDF + HYDROELASTIC, kh=1e10 (soft pads), condim=4.
+#   * nut/bolt — 256-cube SDF + HYDROELASTIC, kh=1e11 (rigid thread features).
+#   * other panda links — 64-cube SDF only, used for fast distance lookups.
+# Builder-time only; the NewtonCfg (use_mujoco_contacts=False +
+# sdf_hydroelastic_config) is what actually engages the hydroelastic forces.
 # ---------------------------------------------------------------------------
-#
-# Mirrors the ``dev/mzamoramora/factory-sim2sim`` (panda-nut-bolt) setup:
-#
-# * Fingers — 192-cube SDF, ``HYDROELASTIC`` flag, ``kh=1e10`` (10× softer
-#   than nut/bolt so the pads compress sub-mm against the nut surface and
-#   build real grip force without visibly interpenetrating the visual
-#   mesh), ``mu_torsional=0.1``, MuJoCo ``condim=4`` so the torsional
-#   friction constraint is actually solved (default condim=3 silently
-#   ignores ``mu_torsional``).
-#
-# * Nut + bolt — 256-cube SDF, ``HYDROELASTIC``, ``kh=1e11`` (rigid). High
-#   resolution is needed because the M16 thread pitch is ~2 mm.
-#
-# * Other panda links — 64-cube SDF only (no ``HYDROELASTIC``). Used by
-#   MuJoCo for fast distance lookups instead of BVH walks; doesn't add
-#   hydroelastic forces.
-#
-# These are *builder-time* writes — they only configure the geometry side.
-# To engage the hydroelastic forces themselves we need to wire the solver
-# with ``use_mujoco_contacts=False`` + ``sdf_hydroelastic_config`` (which
-# routes external SDF contacts into mjwarp). That's a separate NewtonCfg
-# change; without it, MuJoCo runs its own collision detection and the
-# SDFs are available only for distance queries.
 
 # SDF resolutions (cube edge). Match panda-nut-bolt's profile.
 _SDF_RES_FINGER = 192
