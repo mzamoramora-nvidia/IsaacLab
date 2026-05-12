@@ -1,14 +1,6 @@
 Added
 ^^^^^
 
-* Added :attr:`~isaaclab_newton.physics.NewtonCfg.collide_substeps` to
-  :class:`~isaaclab_newton.physics.NewtonCfg`, gating per-substep
-  collision detection inside :meth:`~isaaclab_newton.physics.NewtonManager._simulate_physics_only`.
-  Default ``0`` preserves the legacy single-collide-per-step behaviour
-  bit-identically; ``N >= 1`` re-detects contacts every ``N`` substeps,
-  matching the panda-nut-bolt OSC example's contact density and keeping
-  stiff hydroelastic / penalty contact penetration bounded.
-
 * Added :attr:`~isaaclab_newton.physics.HydroelasticSDFCfg.moment_matching`
   to surface Newton's PhysX-patch-friction analog on the IsaacLab
   config side.

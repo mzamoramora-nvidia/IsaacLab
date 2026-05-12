@@ -126,6 +126,16 @@ class FactoryEnv(DirectRLEnv):
         # bolt kinematic, and align the cuboid table top to the bolt's
         # default z=0.05 (in ``_setup_scene``) so it sits flush.
         if _is_newton_backend(cfg):
+            # Newton runs the physics solver at 240 Hz (vs 120 Hz on PhysX) with
+            # ``decimation = 16`` so the effective control rate stays at 15 Hz.
+            # Smaller physics_dt = fresher contact set each step, which removes
+            # the need for the panda-nut-bolt OSC example's per-substep collide
+            # passes for stiff hydroelastic threading. PhysX defaults
+            # (``dt = 1/120``, ``decimation = 8``) are preserved by the
+            # ``FactoryEnvCfg.sim``/``FactoryEnvCfg.decimation`` shared defaults.
+            cfg.sim.dt = 1.0 / 240.0
+            cfg.decimation = 16
+
             kinematic_for = {"fixed_asset", "small_gear_cfg", "large_gear_cfg"}
             for asset_attr in ("fixed_asset", "held_asset", "small_gear_cfg", "large_gear_cfg"):
                 asset_cfg = getattr(self.cfg_task, asset_attr, None)

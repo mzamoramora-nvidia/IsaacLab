@@ -160,24 +160,13 @@ class FactoryPhysicsCfg(PresetCfg):
                 output_contact_surface=False,
             ),
         ),
-        # 5 solver substeps per 8.33 ms physics tick → 1.67 ms substep
-        # dt. Matches the panda-nut-bolt OSC example's per-substep dt
-        # at our 120 Hz physics rate (theirs: 60 Hz physics × 10
-        # substeps = 1.67 ms; ours: 120 Hz × 5 = 1.67 ms). Was 15,
-        # inherited from ``mzamora/newton-dev`` (no hydroelastic) —
-        # 15 was needed for OSC integrator stability there. With
-        # hydroelastic stiff penalty contacts now in the loop, the
-        # extra substeps mostly added cost; what mattered for the
-        # close-on-nut case was the per-substep collision density.
-        num_substeps=5,
-        # Re-detect contacts every substep (matches the
-        # panda-nut-bolt OSC example's ``collide_substeps=1``).
-        # Without this, our 5 substeps of motion against a contact
-        # set captured before the loop produces interpenetration on
-        # the gripper close (geometry moves ~5 mm during a 8.3 ms
-        # tick under stiff finger PD; stale contacts stop applying
-        # corrective forces once the gripper has moved past them).
-        collide_substeps=3,
+        # 2 solver substeps per 4.17 ms physics tick (Newton runs at
+        # 240 Hz; see :class:`FactoryEnv.__init__`) → 2.08 ms substep
+        # dt. Stiff hydroelastic + penalty contacts then see a fresh
+        # collision set every 4.17 ms; the panda-nut-bolt OSC example
+        # achieves the same freshness with per-substep collide passes
+        # at a longer physics_dt.
+        num_substeps=2,
         use_cuda_graph=True,
     )
     default = physx

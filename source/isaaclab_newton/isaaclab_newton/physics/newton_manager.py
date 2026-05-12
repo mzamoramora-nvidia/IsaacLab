@@ -128,7 +128,6 @@ class NewtonManager(PhysicsManager):
 
     _solver_dt: float = 1.0 / 200.0
     _num_substeps: int = 1
-    _collide_substeps: int = 0
     _num_envs: int | None = None
 
     # Newton model and state
@@ -995,7 +994,6 @@ class NewtonManager(PhysicsManager):
 
         with Timer(name="newton_initialize_solver", msg="Initialize solver took:"):
             NewtonManager._num_substeps = cfg.num_substeps  # type: ignore[union-attr]
-            NewtonManager._collide_substeps = int(getattr(cfg, "collide_substeps", 0))
             NewtonManager._solver_dt = cls.get_physics_dt() / cls._num_substeps
             NewtonManager._collision_cfg = cfg.collision_cfg  # type: ignore[union-attr]
 
@@ -1190,32 +1188,17 @@ class NewtonManager(PhysicsManager):
         The caller (``step()``) is responsible for calling ``sync_transforms_to_usd()``
         eagerly after ``wp.capture_launch``.
         """
-        # Per-substep collision detection is gated on
-        # ``cfg.collide_substeps``:
-        #   * 0 (legacy): collide once, before the substep loop.
-        #   * N >= 1: collide every Nth substep inside the loop, so
-        #             the contact set stays fresh for stiff
-        #             hydroelastic / penalty contacts. Matches the
-        #             panda-nut-bolt OSC example's ``collide_substeps``
-        #             knob.
-        collide_every_n = cls._collide_substeps
-        per_substep_collide = collide_every_n >= 1 and cls._needs_collision_pipeline
-
-        if cls._needs_collision_pipeline and not per_substep_collide:
+        if cls._needs_collision_pipeline:
             cls._collision_pipeline.collide(cls._state_0, cls._contacts)
 
         if cls._use_single_state:
-            for i in range(cls._num_substeps):
-                if per_substep_collide and (i % collide_every_n == 0):
-                    cls._collision_pipeline.collide(cls._state_0, cls._contacts)
+            for _ in range(cls._num_substeps):
                 cls._step_solver(cls._state_0, cls._state_0, cls._control, cls._solver_dt)
                 cls._state_0.clear_forces()
         else:
             cfg = PhysicsManager._cfg
             need_copy_on_last_substep = (cfg is not None and cfg.use_cuda_graph) and cls._num_substeps % 2 == 1  # type: ignore[union-attr]
             for i in range(cls._num_substeps):
-                if per_substep_collide and (i % collide_every_n == 0):
-                    cls._collision_pipeline.collide(cls._state_0, cls._contacts)
                 cls._step_solver(cls._state_0, cls._state_1, cls._control, cls._solver_dt)
                 if need_copy_on_last_substep and i == cls._num_substeps - 1:
                     cls._state_0.assign(cls._state_1)
