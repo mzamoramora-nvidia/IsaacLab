@@ -72,21 +72,26 @@ class FactoryEnv(DirectRLEnv):
         cfg.observation_space += cfg.action_space
         cfg.state_space += cfg.action_space
         self.cfg_task = cfg.task
+        # Cache once: every other method reads ``self._is_newton`` instead of
+        # re-running the predicate.
+        self._is_newton = _is_newton_backend(cfg)
 
-        # Newton-only cfg overrides (physics rate, asset wrapping, actuator
-        # tuning, cloner monkey-patch, contact-buffer sizing).
-        if _is_newton_backend(cfg):
+        if self._is_newton:
             from . import factory_newton_setup
 
             factory_newton_setup.apply_cfg_overrides(cfg)
 
         super().__init__(cfg, render_mode, **kwargs)
 
-        factory_utils.set_body_inertias(self._robot, self.scene.num_envs)
+        # ``factory_utils.set_body_inertias`` / ``set_friction`` reach into
+        # PhysX's ``root_view`` API, which Newton's adapter doesn't expose; the
+        # friction value from the spawn cfg / USD is in effect on Newton.
+        if not self._is_newton:
+            factory_utils.set_body_inertias(self._robot, self.scene.num_envs)
         self._init_tensors()
         self._set_default_dynamics_parameters()
 
-        if _is_newton_backend(self.cfg):
+        if self._is_newton:
             from . import factory_newton_setup
 
             factory_newton_setup.warm_up_kernels(self)
@@ -104,10 +109,11 @@ class FactoryEnv(DirectRLEnv):
             (self.num_envs, 1)
         )
 
-        # Set masses and frictions.
-        factory_utils.set_friction(self._held_asset, self.cfg_task.held_asset_cfg.friction, self.scene.num_envs)
-        factory_utils.set_friction(self._fixed_asset, self.cfg_task.fixed_asset_cfg.friction, self.scene.num_envs)
-        factory_utils.set_friction(self._robot, self.cfg_task.robot_cfg.friction, self.scene.num_envs)
+        # Set masses and frictions. See note in ``__init__`` on Newton.
+        if not self._is_newton:
+            factory_utils.set_friction(self._held_asset, self.cfg_task.held_asset_cfg.friction, self.scene.num_envs)
+            factory_utils.set_friction(self._fixed_asset, self.cfg_task.fixed_asset_cfg.friction, self.scene.num_envs)
+            factory_utils.set_friction(self._robot, self.cfg_task.robot_cfg.friction, self.scene.num_envs)
 
     def _init_tensors(self):
         """Initialize tensors once."""
@@ -128,7 +134,7 @@ class FactoryEnv(DirectRLEnv):
         # Newton OSC buffers (None on PhysX so the per-step dispatch is a single
         # cheap is-not-None check rather than calling into the resolver each step).
         self._newton_osc_buffers = None
-        if _is_newton_backend(self.cfg):
+        if self._is_newton:
             from . import factory_control_newton
 
             self._newton_osc_buffers = factory_control_newton.build_buffers(
@@ -160,7 +166,7 @@ class FactoryEnv(DirectRLEnv):
         # ``RigidObjectCfg`` directly. ``MeshCuboidCfg`` (not ``CuboidCfg``) so
         # ``_build_collision_sdfs`` can bake a voxel SDF for "Show Collision".
         # Top surface at z=0; bolt init_state.pos.z is remapped to match.
-        if _is_newton_backend(self.cfg):
+        if self._is_newton:
             table_cfg = RigidObjectCfg(
                 prim_path="/World/envs/env_.*/Table",
                 spawn=sim_utils.MeshCuboidCfg(
@@ -200,8 +206,7 @@ class FactoryEnv(DirectRLEnv):
         # PhysX: Articulation also satisfies the rigid-object dict contract;
         # mirrors what shadow_hand_vision does). Either backend can read its
         # own object back via the dict on reset/randomization paths.
-        is_newton = _is_newton_backend(self.cfg)
-        asset_registry = self.scene.rigid_objects if is_newton else self.scene.articulations
+        asset_registry = self.scene.rigid_objects if self._is_newton else self.scene.articulations
         asset_registry["fixed_asset"] = self._fixed_asset
         asset_registry["held_asset"] = self._held_asset
         if self.cfg_task.name == "gear_mesh":
@@ -211,7 +216,7 @@ class FactoryEnv(DirectRLEnv):
         # Newton-only: register the kinematic table RigidObject so the scene
         # can clone/bind it and the data layer can resolve its body. PhysX
         # spawned the table as a plain static prim and doesn't need this.
-        if is_newton:
+        if self._is_newton:
             self.scene.rigid_objects["table"] = self._table
 
         # add lights
@@ -220,7 +225,7 @@ class FactoryEnv(DirectRLEnv):
 
         # Register Newton's MODEL_INIT callback here (before model finalization)
         # rather than in __init__ after super().__init__.
-        if is_newton:
+        if self._is_newton:
             from . import factory_newton_setup
 
             factory_newton_setup.register_model_init_callback()
@@ -1093,7 +1098,7 @@ class FactoryEnv(DirectRLEnv):
         # Restore gravity (PhysX). Newton's adapter doesn't honour the
         # per-body ``disable_gravity=True`` flags set on the robot / held nut,
         # so keep global gravity at zero post-reset to match PhysX behaviour.
-        if _is_newton_backend(self.cfg):
+        if self._is_newton:
             _set_sim_gravity(self.cfg, (0.0, 0.0, 0.0))
         else:
             _set_sim_gravity(self.cfg, tuple(self.cfg.sim.gravity))

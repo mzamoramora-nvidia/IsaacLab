@@ -30,15 +30,7 @@ def wrap_yaw(angle):
 
 
 def set_friction(asset, value, num_envs):
-    """Update material properties for a given asset.
-
-    On Newton, ``root_view`` does not expose ``get_material_properties`` /
-    ``set_material_properties`` (those are PhysX TensorView APIs). We skip
-    silently — the friction value declared in the spawn config / USD remains
-    in effect.
-    """
-    if not hasattr(asset.root_view, "get_material_properties"):
-        return
+    """Update material properties for a given asset."""
     materials = wp.to_torch(asset.root_view.get_material_properties())
     materials[..., 0] = value  # Static friction.
     materials[..., 1] = value  # Dynamic friction.
@@ -49,16 +41,7 @@ def set_friction(asset, value, num_envs):
 
 
 def set_body_inertias(robot, num_envs):
-    """Add 0.01 to each body's inertia diagonal — IGE asset_options.armature parity.
-
-    On the Newton backend ``robot.root_view`` does not expose
-    ``get_inertias`` / ``set_inertias`` (those are PhysX TensorView APIs), so
-    this is currently skipped. Newton's ``Model.joint_armature`` is **not** an
-    automatic substitute: Factory's actuator cfg sets ``armature=0.0``, so
-    nothing populates ``joint_armature`` either.
-    """
-    if not hasattr(robot.root_view, "get_inertias"):
-        return
+    """Note: this is to account for the asset_options.armature parameter in IGE."""
     inertias = wp.to_torch(robot.root_view.get_inertias())
     offset = torch.zeros_like(inertias)
     offset[:, :, [0, 4, 8]] += 0.01
