@@ -111,8 +111,28 @@ class NewtonGlPerspectiveVideo:
         dt = sim.get_physics_dt()
 
         viewer = self._viewer
+
+        # Hydroelastic SDF contact surface ("isosurface") overlay. Mirrors
+        # ``NewtonVisualizer.step`` (newton_visualizer.py:402-415): only
+        # fetched when the viewer's ``show_hydro_contact_surface`` flag is
+        # on AND the scene-data provider exposes the collision pipeline.
+        # ``get_contact_surface()`` may return None when the pipeline was
+        # built with ``output_contact_surface=False``; we still pass it
+        # through so a None clears the previous frame's overlay.
+        hydro_surface = None
+        if getattr(viewer, "show_hydro_contact_surface", False) and hasattr(sdp, "get_collision_pipeline"):
+            pipeline = sdp.get_collision_pipeline()
+            hydro_sdf = getattr(pipeline, "hydroelastic_sdf", None) if pipeline is not None else None
+            if hydro_sdf is not None and hasattr(hydro_sdf, "get_contact_surface"):
+                hydro_surface = hydro_sdf.get_contact_surface()
+
         viewer.begin_frame(dt)
         viewer.log_state(state)
+        if hasattr(viewer, "log_hydro_contact_surface"):
+            try:
+                viewer.log_hydro_contact_surface(hydro_surface, penetrating_only=True)
+            except RuntimeError as exc:
+                logger.debug("[NewtonGlPerspectiveVideo] log_hydro_contact_surface failed: %s", exc)
         viewer.end_frame()
         return viewer.get_frame().numpy()
 
