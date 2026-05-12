@@ -5,18 +5,21 @@
 
 """Factory: procedural Newton-only post-load asset setup.
 
-Two entry points:
+Three entry points called from :class:`FactoryEnv`:
 
-* :func:`register_model_init_callback` — registers a Newton ``MODEL_INIT``
-  callback that runs *before* model finalization, where the
-  :class:`newton.ModelBuilder` is still mutable. Used to override the
-  joint target mode and ctrl-source on the Franka, filter the base ↔
-  table collision pair, retune the nut/bolt contact materials, and
-  build per-shape hydroelastic SDFs.
+* :func:`apply_cfg_overrides` — runs before ``super().__init__``. Raises
+  the physics rate, disables the OSC null-space term, wraps joint-less
+  Factory assets as :class:`RigidObjectCfg`, tunes the arm and finger
+  actuators, monkey-patches the cloner, and sizes the contact buffer.
 
-* :func:`apply` — small post-finalization fix-ups that need the
-  finalized :class:`newton.Model` (e.g. refreshing the OSC buffers'
-  cached armature).
+* :func:`register_model_init_callback` — registers a Newton
+  ``MODEL_INIT`` callback that runs before model finalization. Overrides
+  joint target mode + ctrl-source on the Franka, filters base ↔ table
+  contacts, retunes the nut/bolt contact materials, and builds per-shape
+  hydroelastic SDFs.
+
+* :func:`warm_up_kernels` — runs after ``_init_tensors``. Pre-JITs the
+  Newton kernels the reset IK loop will hit.
 
 PhysX runs never import this module.
 """
@@ -28,12 +31,13 @@ from typing import TYPE_CHECKING
 
 import newton
 
+from isaaclab.assets import ArticulationCfg, RigidObjectCfg
+
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .factory_env import FactoryEnv
-
-_ARM_DOF_COUNT = 7
+    from .factory_env_cfg import FactoryEnvCfg
 
 _ARM_JOINT_NAMES = [f"panda_joint{i}" for i in range(1, 8)]
 _FINGER_JOINT_NAMES = ["panda_finger_joint1", "panda_finger_joint2"]
@@ -53,17 +57,127 @@ def register_model_init_callback() -> None:
     )
 
 
-def apply(env: FactoryEnv) -> None:
-    """Post-finalization fix-ups (refresh OSC buffers' cached armature).
+def apply_cfg_overrides(cfg: FactoryEnvCfg) -> None:
+    """Apply Newton-only cfg overrides in place, *before* ``super().__init__``.
 
-    Called from :meth:`FactoryEnv.__init__` after ``super().__init__()``.
+    Raises the physics rate to 240 Hz with ``decimation = 16`` to keep the
+    control rate at 15 Hz, disables the OSC null-space term, wraps joint-less
+    Factory assets as :class:`RigidObjectCfg` (kinematic for static targets),
+    bumps arm armature, zeroes arm damping, softens finger PD, monkey-patches
+    the cloner to skip convex-hull simplification (so nut/bolt thread + hex
+    SDFs survive cloning), and scales the contact buffer with ``num_envs``.
     """
-    from isaaclab_newton.physics import NewtonManager
+    cfg.sim.dt = 1.0 / 240.0
+    cfg.decimation = 16
+    cfg.ctrl.disable_nullspace = True
 
-    model = NewtonManager._model
-    if model is None:
-        return
-    _refresh_osc_buffers_armature(model, env)
+    cfg_task = cfg.task
+    kinematic_for = {"fixed_asset", "small_gear_cfg", "large_gear_cfg"}
+    for asset_attr in ("fixed_asset", "held_asset", "small_gear_cfg", "large_gear_cfg"):
+        asset_cfg = getattr(cfg_task, asset_attr, None)
+        if isinstance(asset_cfg, ArticulationCfg):
+            setattr(cfg_task, asset_attr, _to_rigid_object_cfg(asset_cfg, kinematic=asset_attr in kinematic_for))
+
+    # Zero the bolt reset's Z noise: the bolt is a kinematic body (USD
+    # PhysicsFixedJoint) so it sticks wherever the reset places it.
+    noise = getattr(cfg_task, "fixed_asset_init_pos_noise", None)
+    if noise is not None and len(noise) >= 3:
+        cfg_task.fixed_asset_init_pos_noise = list(noise[:2]) + [0.0]
+
+    # Bolt init z=0.0 matches the Newton cuboid table top.
+    bolt = getattr(cfg_task, "fixed_asset", None)
+    if bolt is not None and hasattr(bolt, "init_state") and hasattr(bolt.init_state, "pos"):
+        cur_pos = bolt.init_state.pos
+        new_init = bolt.init_state.replace(pos=(float(cur_pos[0]), float(cur_pos[1]), 0.0))
+        cfg_task.fixed_asset = bolt.replace(init_state=new_init)
+
+    # Arm armature stabilises OSC Lambda; must be set before super().__init__
+    # so finalize bakes it into model.joint_armature.
+    arm_actuators = cfg.robot.actuators
+    arm_actuators["panda_arm1"].armature = 0.3
+    arm_actuators["panda_arm2"].armature = 0.11
+    arm_actuators["panda_hand"].armature = 0.15
+
+    # kd=0: OSC Kd=2√Kp + armature already damp the 7th DOF; extra kd brakes
+    # OSC tracking (kd=10 → +12 mm step error vs PhysX +48 mm).
+    arm_actuators["panda_arm1"].damping = 0.0
+    arm_actuators["panda_arm2"].damping = 0.0
+
+    # Softer finger PD than PhysX default (7500, 173): with hydroelastic SDFs
+    # grip force comes from kh × penetration, not the PD spring.
+    arm_actuators["panda_hand"].stiffness = 1000.0
+    arm_actuators["panda_hand"].damping = 10.0
+
+    _monkey_patch_cloner_no_simplify()
+
+    # Scale the contact buffer with num_envs so the gripper close doesn't
+    # overflow when the user bumps the world count.
+    if (
+        getattr(cfg.sim.physics, "collision_cfg", None) is not None
+        and getattr(cfg.sim.physics, "solver_cfg", None) is not None
+        and hasattr(cfg.sim.physics.solver_cfg, "njmax")
+    ):
+        njmax = int(cfg.sim.physics.solver_cfg.njmax)
+        num_worlds = int(cfg.scene.num_envs)
+        cfg.sim.physics.collision_cfg.rigid_contact_max = njmax * num_worlds
+
+
+def warm_up_kernels(env: FactoryEnv) -> None:
+    """Pre-JIT Newton's per-step kernels by running two dummy steps.
+
+    Factory's reset path runs a 30-iteration DLS IK loop where each iteration
+    calls ``step_sim_no_action``. On the first iteration Newton JIT-compiles
+    several kernels (``eval_fk``, the actuator-model kernels,
+    ``eval_jacobian``/``eval_mass_matrix``) that each take 10-30 s; pre-paying
+    that cost here keeps the 30 IK iterations on warm caches.
+    """
+    for _ in range(2):
+        env.step_sim_no_action()
+
+
+def _to_rigid_object_cfg(art_cfg: ArticulationCfg, kinematic: bool) -> RigidObjectCfg:
+    """Adapt a joint-less Factory ArticulationCfg into a RigidObjectCfg.
+
+    Wraps the asset as :class:`RigidObjectCfg` with
+    ``kinematic_enabled=True`` for static targets so ``cfg.class_type(cfg)``
+    constructs a :class:`RigidObject` at scene-setup time.
+    """
+    import isaaclab.sim as sim_utils  # noqa: PLC0415
+
+    rigid_props = art_cfg.spawn.rigid_props
+    if kinematic:
+        rigid_props = (
+            rigid_props.replace(kinematic_enabled=True)
+            if rigid_props is not None
+            else sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True)
+        )
+    spawn = art_cfg.spawn.replace(rigid_props=rigid_props)
+    return RigidObjectCfg(
+        prim_path=art_cfg.prim_path,
+        spawn=spawn,
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=art_cfg.init_state.pos,
+            rot=art_cfg.init_state.rot,
+            lin_vel=art_cfg.init_state.lin_vel,
+            ang_vel=art_cfg.init_state.ang_vel,
+        ),
+    )
+
+
+def _monkey_patch_cloner_no_simplify() -> None:
+    """Skip the cloner's convex-hull mesh approximation so per-shape SDFs survive."""
+    from isaaclab_newton.cloner import newton_replicate as _nr
+
+    _orig = _nr.newton_physics_replicate
+
+    def _no_simplify(*args, **kwargs):
+        kwargs.setdefault("simplify_meshes", False)
+        return _orig(*args, **kwargs)
+
+    _nr.newton_physics_replicate = _no_simplify
+    import isaaclab_newton.cloner as _cloner_module  # noqa: PLC0415
+
+    _cloner_module.newton_physics_replicate = _no_simplify
 
 
 # ---------------------------------------------------------------------------
@@ -371,28 +485,3 @@ def _build_collision_sdfs(builder) -> None:
         counts["skip_no_mesh"],
         counts["skip_already_built"],
     )
-
-
-# ---------------------------------------------------------------------------
-# Post-finalization fix-ups.
-# ---------------------------------------------------------------------------
-
-
-def _refresh_osc_buffers_armature(model, env: FactoryEnv) -> None:
-    """Sync ``arm_armature_torch`` in the OSC buffers with the finalized model.
-
-    ``factory_control_newton`` patches the OSC mass matrix's diagonal
-    with ``arm_armature_torch``; if we wrote new armature in the
-    builder callback, refresh the cached torch tensor so the OSC's
-    ``H + diag(armature)`` matches what the integrator uses.
-    """
-    osc_buffers = getattr(env, "_newton_osc_buffers", None)
-    if osc_buffers is None:
-        return
-    import torch  # noqa: PLC0415
-
-    armature_np = model.joint_armature.numpy()[:_ARM_DOF_COUNT].copy()
-    new_arm_armature = torch.as_tensor(armature_np, device=osc_buffers.arm_armature_torch.device, dtype=torch.float32)
-    osc_buffers.arm_armature_torch.copy_(new_arm_armature)
-
-

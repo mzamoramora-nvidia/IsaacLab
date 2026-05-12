@@ -10,7 +10,7 @@ import warp as wp
 import carb
 
 import isaaclab.sim as sim_utils
-from isaaclab.assets import Articulation, ArticulationCfg, RigidObject, RigidObjectCfg
+from isaaclab.assets import Articulation, RigidObject, RigidObjectCfg
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils import math as torch_utils
@@ -18,37 +18,6 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 from . import factory_control, factory_utils
 from .factory_env_cfg import OBS_DIM_CFG, STATE_DIM_CFG, FactoryEnvCfg
-
-
-def _newton_rigid_object_cfg(art_cfg: ArticulationCfg, kinematic: bool) -> RigidObjectCfg:
-    """Adapt a joint-less Factory ArticulationCfg into a RigidObjectCfg for Newton.
-
-    Wraps the asset as :class:`RigidObjectCfg`, marks static targets
-    ``kinematic_enabled=True``, and leaves manipulated objects dynamic. The
-    resulting cfg has ``class_type = RigidObject``, so ``cfg.class_type(cfg)``
-    constructs the right wrapper at scene-setup time. PhysX is unaffected.
-    """
-    rigid_props = art_cfg.spawn.rigid_props
-    if kinematic:
-        # Replace the rigid_props with kinematic_enabled set; keep every other
-        # field. RigidBodyPropertiesCfg is a configclass dataclass, so .replace
-        # gives us a copy with one field overridden.
-        rigid_props = (
-            rigid_props.replace(kinematic_enabled=True)
-            if rigid_props is not None
-            else (sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True))
-        )
-    spawn = art_cfg.spawn.replace(rigid_props=rigid_props)
-    return RigidObjectCfg(
-        prim_path=art_cfg.prim_path,
-        spawn=spawn,
-        init_state=RigidObjectCfg.InitialStateCfg(
-            pos=art_cfg.init_state.pos,
-            rot=art_cfg.init_state.rot,
-            lin_vel=art_cfg.init_state.lin_vel,
-            ang_vel=art_cfg.init_state.ang_vel,
-        ),
-    )
 
 
 def _set_sim_gravity(cfg: FactoryEnvCfg, gravity: tuple[float, float, float]) -> None:
@@ -104,105 +73,23 @@ class FactoryEnv(DirectRLEnv):
         cfg.state_space += cfg.action_space
         self.cfg_task = cfg.task
 
-        # Newton path: wrap joint-less Factory assets as :class:`RigidObjectCfg`
-        # with ``kinematic_enabled=True`` for static targets, raise the physics
-        # rate, disable the OSC null-space term, and align static-asset poses
-        # to the cuboid table top. PhysX path is untouched.
+        # Newton-only cfg overrides (physics rate, asset wrapping, actuator
+        # tuning, cloner monkey-patch, contact-buffer sizing).
         if _is_newton_backend(cfg):
-            # 240 Hz physics × 16 decimation → 15 Hz control. Smaller physics_dt
-            # keeps the contact set fresh for stiff hydroelastic threading.
-            cfg.sim.dt = 1.0 / 240.0
-            cfg.decimation = 16
-
-            # Disable the OSC null-space term on Newton (see ``CtrlCfg``).
-            cfg.ctrl.disable_nullspace = True
-
-            kinematic_for = {"fixed_asset", "small_gear_cfg", "large_gear_cfg"}
-            for asset_attr in ("fixed_asset", "held_asset", "small_gear_cfg", "large_gear_cfg"):
-                asset_cfg = getattr(self.cfg_task, asset_attr, None)
-                if isinstance(asset_cfg, ArticulationCfg):
-                    setattr(
-                        self.cfg_task,
-                        asset_attr,
-                        _newton_rigid_object_cfg(asset_cfg, kinematic=asset_attr in kinematic_for),
-                    )
-
-            # Zero the bolt reset's Z noise: the bolt is a kinematic body
-            # (USD PhysicsFixedJoint) so it sticks wherever the reset places
-            # it; non-zero z-noise causes it to clip into / float above the
-            # table.
-            noise = getattr(self.cfg_task, "fixed_asset_init_pos_noise", None)
-            if noise is not None and len(noise) >= 3:
-                self.cfg_task.fixed_asset_init_pos_noise = list(noise[:2]) + [0.0]
-
-            # Bolt init z=0.0 matches the Newton cuboid table top
-            # (at z = -0.02, thickness 0.04); the Factory default of 0.05
-            # was chosen for PhysX's ``table_instanceable.usd``.
-            bolt = getattr(self.cfg_task, "fixed_asset", None)
-            if bolt is not None and hasattr(bolt, "init_state") and hasattr(bolt.init_state, "pos"):
-                cur_pos = bolt.init_state.pos
-                new_init = bolt.init_state.replace(pos=(float(cur_pos[0]), float(cur_pos[1]), 0.0))
-                self.cfg_task.fixed_asset = bolt.replace(init_state=new_init)
-            # Armature must be set before super().__init__ so finalize bakes
-            # it into model.joint_armature; stabilises OSC Lambda.
-            arm_actuators = cfg.robot.actuators
-            arm_actuators["panda_arm1"].armature = 0.3
-            arm_actuators["panda_arm2"].armature = 0.11
-            arm_actuators["panda_hand"].armature = 0.15
-
-            # kd=0: OSC Kd=2√Kp + armature already damp the 7th DOF; extra kd
-            # brakes OSC tracking (kd=10 → +12 mm step error vs PhysX +48 mm).
-            arm_actuators["panda_arm1"].damping = 0.0
-            arm_actuators["panda_arm2"].damping = 0.0
-
-            # Softer finger PD than PhysX default (7500, 173): with hydroelastic
-            # SDFs grip force comes from kh × penetration, not the PD spring.
-            arm_actuators["panda_hand"].stiffness = 1000.0
-            arm_actuators["panda_hand"].damping = 10.0
-
-            # Skip convex-hull simplification so nut/bolt thread + hex SDFs
-            # survive cloning.
-            from isaaclab_newton.cloner import newton_replicate as _nr
-
-            _orig_replicate = _nr.newton_physics_replicate
-
-            def _factory_no_convex_hull_replicate(*args, **kwargs):
-                kwargs.setdefault("simplify_meshes", False)
-                return _orig_replicate(*args, **kwargs)
-
-            _nr.newton_physics_replicate = _factory_no_convex_hull_replicate
-            import isaaclab_newton.cloner as _isaaclab_newton_cloner
-
-            _isaaclab_newton_cloner.newton_physics_replicate = _factory_no_convex_hull_replicate
-
-            # Scale the contact buffer with num_envs so the gripper close
-            # doesn't overflow when the user bumps the world count.
-            if (
-                getattr(cfg.sim.physics, "collision_cfg", None) is not None
-                and getattr(cfg.sim.physics, "solver_cfg", None) is not None
-                and hasattr(cfg.sim.physics.solver_cfg, "njmax")
-            ):
-                njmax = int(cfg.sim.physics.solver_cfg.njmax)
-                num_worlds = int(cfg.scene.num_envs)
-                cfg.sim.physics.collision_cfg.rigid_contact_max = njmax * num_worlds
-
-        super().__init__(cfg, render_mode, **kwargs)
-
-        # Newton-only post-load asset setup. PhysX never imports this module.
-        if _is_newton_backend(self.cfg):
             from . import factory_newton_setup
 
-            factory_newton_setup.apply(self)
+            factory_newton_setup.apply_cfg_overrides(cfg)
+
+        super().__init__(cfg, render_mode, **kwargs)
 
         factory_utils.set_body_inertias(self._robot, self.scene.num_envs)
         self._init_tensors()
         self._set_default_dynamics_parameters()
 
-        # Warm up Newton kernels (eval_fk, actuator, eval_jacobian/mass_matrix)
-        # so the 30-step reset IK loop hits warm caches.
         if _is_newton_backend(self.cfg):
-            for _ in range(2):
-                self.step_sim_no_action()
+            from . import factory_newton_setup
+
+            factory_newton_setup.warm_up_kernels(self)
 
     def _set_default_dynamics_parameters(self):
         """Set parameters defining dynamic interactions."""
