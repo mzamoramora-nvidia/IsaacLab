@@ -802,8 +802,6 @@ class FactoryEnv(DirectRLEnv):
             task_deriv_gains=self.task_deriv_gains,
             device=self.device,
             dead_zone_thresholds=self.dead_zone_thresholds,
-            use_lambda=getattr(self.cfg.ctrl, "use_osc_lambda", False),
-            disable_nullspace=getattr(self.cfg.ctrl, "disable_nullspace", False),
         )
 
         # set target for gripper joints to use physx's PD controller
@@ -1132,107 +1130,8 @@ class FactoryEnv(DirectRLEnv):
         self._compute_intermediate_values(dt=self.physics_dt)
 
     def randomize_initial_state(self, env_ids):
-        """Randomize initial state and perform any episode-level randomization.
-
-        Both backends use the original Factory full-reset path: disable
-        gravity, randomize bolt pose, drive the gripper above the bolt
-        with iterative DLS IK, place the nut into the closed gripper,
-        run a grasp-settle, restore gravity. This is the path the
-        ``mzamoramora-nvidia/private-IsaacLab/mzamora/newton-dev`` branch
-        uses for Newton too — and the only one that produces a
-        keypoint-distance reward signal at episode start (the simplified
-        reset leaves the nut at its world default, where the
-        keypoint-pose math returns NaN).
-
-        The Newton-only ``_simplified_newton_reset`` path is kept behind
-        the ``cfg.ctrl.simplified_newton_reset`` cfg flag so we can still
-        bring it back as a viewer-only diagnostic when needed.
-        """
-        if getattr(self.cfg.ctrl, "simplified_newton_reset", False) and self._newton_osc_buffers is not None:
-            self._simplified_newton_reset(env_ids)
-            return
-
+        """Randomize initial state and perform any episode-level randomization."""
         self._full_reset(env_ids)
-
-    def _simplified_newton_reset(self, env_ids):
-        """Deterministic reset used on the Newton backend.
-
-        ``cfg.ctrl.reset_joints`` is the IK *seed* pose used by Factory's
-        full reset, not the IK target above the bolt — placing the arm
-        there leaves it in a configuration where the OSC can't track and
-        the EE drifts off during the first few control ticks. We instead
-        place the arm at a hand-tuned "above the bolt" home (the joint
-        config PhysX's IK converges to under the Factory NutThread cfg)
-        so the OSC starts from a sensible posture. The held / fixed
-        assets were already placed at their default poses by
-        :meth:`_reset_idx`.
-        """
-        # IK-converged home for the Factory NutThread bolt. Captured from
-        # a noise-disabled PhysX run of ``scripts/osc_step_response.py``;
-        # the gripper is ~5 cm above the bolt tip with the hand pointing
-        # straight down. Hardcoded so the Newton path doesn't have to
-        # run IK at reset.
-        ABOVE_BOLT_HOME = [-0.529, 0.521, 0.538, -2.040, -0.414, 2.455, -0.721]
-        self._set_franka_to_default_pose(joints=ABOVE_BOLT_HOME, env_ids=env_ids)
-
-        # Bolt tip in world frame — used as the policy's reference point.
-        fixed_tip_pos_local = torch.zeros((self.num_envs, 3), device=self.device)
-        fixed_tip_pos_local[:, 2] += self.cfg_task.fixed_asset_cfg.height
-        fixed_tip_pos_local[:, 2] += self.cfg_task.fixed_asset_cfg.base_height
-        if self.cfg_task.name == "gear_mesh":
-            fixed_tip_pos_local[:, 0] = self.cfg_task.fixed_asset_cfg.medium_gear_base_offset[0]
-        fixed_tip_pos, _ = torch_utils.combine_frame_transforms(
-            self.fixed_pos,
-            self.fixed_quat,
-            fixed_tip_pos_local,
-            torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device).unsqueeze(0).repeat(self.num_envs, 1),
-        )
-        self.fixed_pos_obs_frame[:] = fixed_tip_pos
-        self.init_fixed_pos_obs_noise[:] = 0.0
-
-        # Close the gripper for a short window so contact pipeline runs.
-        # Disable gravity for the settle: the arm joints have ``ke = kd = 0``
-        # (the Franka USD doesn't bake PD gains, and Newton's actuator only
-        # applies the OSC torque written via :attr:`Control.joint_f` from
-        # ``_apply_action``), so without gravity-comp the arm freefalls
-        # during these ticks and lands far from ``ABOVE_BOLT_HOME``. With
-        # gravity zeroed the arm stays put while the gripper closes; we
-        # restore gravity at the end and the OSC takes over from there.
-        _set_sim_gravity(self.cfg, (0.0, 0.0, 0.0))
-        self.ctrl_target_joint_pos[env_ids, 7:] = 0.0
-        self._robot.set_joint_position_target_index(target=self.ctrl_target_joint_pos)
-        n_steps = max(1, int(0.25 / self.physics_dt))
-        for _ in range(n_steps):
-            self.step_sim_no_action()
-        # On Newton, keep global gravity at zero post-reset to replicate
-        # PhysX's per-body ``disable_gravity=True`` regime. Every dynamic
-        # body in our Factory scene has ``disable_gravity=True`` under
-        # PhysX (robot in :class:`FactoryEnvCfg.robot.spawn.rigid_props`,
-        # held nut in :class:`factory_tasks_cfg.FactoryTask.held_asset`).
-        # Newton's IsaacLab adapter doesn't honour per-body
-        # ``disable_gravity``, so leaving gravity on causes the held
-        # nut to fall at ~g, pull the gripper down via grip friction, and
-        # produce ~10 mm TCP drift during R0 hold (probe_zero_gravity_drift
-        # showed drift 9.28 mm with gravity on, 0.015 mm with gravity off).
-        # With gravity off, gravcomp on the robot ``-m·g·factor = 0`` —
-        # the OSC has no gravity load to compensate, matching PhysX exactly.
-        if _is_newton_backend(self.cfg):
-            _set_sim_gravity(self.cfg, (0.0, 0.0, 0.0))
-        else:
-            _set_sim_gravity(self.cfg, tuple(self.cfg.sim.gravity))
-
-        # Seed finite-difference state from the post-settle pose.
-        self.prev_joint_pos = self.joint_pos[:, 0:7].clone()
-        self.prev_fingertip_pos = self.fingertip_midpoint_pos.clone()
-        self.prev_fingertip_quat = self.fingertip_midpoint_quat.clone()
-
-        self.actions = torch.zeros_like(self.actions)
-        self.prev_actions = torch.zeros_like(self.actions)
-        self.ee_angvel_fd[:, :] = 0.0
-        self.ee_linvel_fd[:, :] = 0.0
-
-        self.task_prop_gains = self.default_gains
-        self.task_deriv_gains = factory_utils.get_deriv_gains(self.default_gains)
 
     def _full_reset(self, env_ids):
         """Original PhysX reset path: IK + asset randomization + grasp settle."""

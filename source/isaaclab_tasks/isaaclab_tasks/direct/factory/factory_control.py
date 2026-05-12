@@ -31,21 +31,8 @@ def compute_dof_torque(
     task_deriv_gains,
     device,
     dead_zone_thresholds=None,
-    disable_nullspace: bool = False,
-    use_lambda: bool = False,
 ):
-    """Compute Franka DOF torque to move fingertips towards target pose.
-
-    Args:
-        disable_nullspace: Skip the null-space term entirely. Useful as a
-            diagnostic when the OSC + null-space combination drifts the arm.
-        use_lambda: If True, weight the task wrench by the operational-space
-            inertia ``Lambda = (J H^-1 J^T)^-1`` before mapping through
-            ``J^T``. The plain Jacobian-transpose path is the default for
-            parity with the upstream Factory PhysX behaviour; the
-            Lambda-weighted path is what Newton's MJW solver expects when
-            ``use_osc_lambda=True``.
-    """
+    """Compute Franka DOF torque to move fingertips towards target pose."""
     # References:
     # 1) https://ethz.ch/content/dam/ethz/special-interest/mavt/robotics-n-intelligent-systems/rsl-dam/documents/RobotDynamics2018/RD_HS2018script.pdf
     # 2) Modern Robotics
@@ -88,27 +75,19 @@ def compute_dof_torque(
     arm_mass_matrix_task = torch.inverse(
         jacobian @ arm_mass_matrix_inv @ jacobian_T
     )  # ETH eq. 3.86; geometric Jacobian is assumed
+    dof_torque[:, 0:7] = (jacobian_T @ task_wrench.unsqueeze(-1)).squeeze(-1)
 
-    if use_lambda:
-        # Operational-space-inertia-weighted task wrench (eq. 3.96).
-        task_wrench_osc = (arm_mass_matrix_task @ task_wrench.unsqueeze(-1)).squeeze(-1)
-        dof_torque[:, 0:7] = (jacobian_T @ task_wrench_osc.unsqueeze(-1)).squeeze(-1)
-    else:
-        # Plain Jacobian-transpose mapping. Matches PhysX-side Factory behaviour.
-        dof_torque[:, 0:7] = (jacobian_T @ task_wrench.unsqueeze(-1)).squeeze(-1)
-
-    if not disable_nullspace:
-        j_eef_inv = arm_mass_matrix_task @ jacobian @ arm_mass_matrix_inv
-        default_dof_pos_tensor = torch.tensor(cfg.ctrl.default_dof_pos_tensor, device=device).repeat((num_envs, 1))
-        # nullspace computation
-        distance_to_default_dof_pos = default_dof_pos_tensor - dof_pos[:, :7]
-        distance_to_default_dof_pos = (distance_to_default_dof_pos + math.pi) % (
-            2 * math.pi
-        ) - math.pi  # normalize to [-pi, pi]
-        u_null = cfg.ctrl.kd_null * -dof_vel[:, :7] + cfg.ctrl.kp_null * distance_to_default_dof_pos
-        u_null = arm_mass_matrix @ u_null.unsqueeze(-1)
-        torque_null = (torch.eye(7, device=device).unsqueeze(0) - jacobian_T @ j_eef_inv) @ u_null
-        dof_torque[:, 0:7] += torque_null.squeeze(-1)
+    j_eef_inv = arm_mass_matrix_task @ jacobian @ arm_mass_matrix_inv
+    default_dof_pos_tensor = torch.tensor(cfg.ctrl.default_dof_pos_tensor, device=device).repeat((num_envs, 1))
+    # nullspace computation
+    distance_to_default_dof_pos = default_dof_pos_tensor - dof_pos[:, :7]
+    distance_to_default_dof_pos = (distance_to_default_dof_pos + math.pi) % (
+        2 * math.pi
+    ) - math.pi  # normalize to [-pi, pi]
+    u_null = cfg.ctrl.kd_null * -dof_vel[:, :7] + cfg.ctrl.kp_null * distance_to_default_dof_pos
+    u_null = arm_mass_matrix @ u_null.unsqueeze(-1)
+    torque_null = (torch.eye(7, device=device).unsqueeze(0) - jacobian_T @ j_eef_inv) @ u_null
+    dof_torque[:, 0:7] += torque_null.squeeze(-1)
 
     # TODO: Verify it's okay to no longer do gripper control here.
     dof_torque = torch.clamp(dof_torque, min=-100.0, max=100.0)

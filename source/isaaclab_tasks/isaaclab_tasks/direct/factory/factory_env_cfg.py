@@ -58,31 +58,6 @@ class ObsRandCfg:
 
 @configclass
 class CtrlCfg:
-    # Newton-only flags (no effect under PhysX). ``newton_ctrl_mode``
-    # picks between OSC (Jacobian-transpose torques into ``Control.joint_f``)
-    # and IK (PD via ``joint_target_pos``); ``use_osc_lambda`` toggles the
-    # operational-space inertia weighting in :func:`factory_control.compute_dof_torque`.
-    newton_ctrl_mode: str = "osc"
-    use_osc_lambda: bool = False
-    # When True, skip the OSC null-space term in
-    # :func:`factory_control.compute_dof_torque`. Default flipped to
-    # True after the 500-tick hold-pose probe showed the null-space
-    # term was leaking a non-zero TCP-direction torque in both Newton
-    # and PhysX paths, producing ~3 mm drift over 4 s of sim. Root
-    # cause: ``default_dof_pos_tensor`` (the null-space target) is
-    # ``[-1.30, -0.40, 1.18, -2.15, 0.40, 1.94, 0.48]``, which does
-    # not match the IK-converged "above bolt" arm config the env
-    # actually holds — so ``u_null = kp_null (q_default - q)`` is
-    # large and the ``(I − J^T Jbar)`` projection's numerical leakage
-    # becomes a constant TCP-direction perturbation the task-space
-    # PD has to fight. Same convention as the Newton OSC reference
-    # (``newton/examples/robot/osc.py``: ``enable_nullspace=False``).
-    disable_nullspace: bool = True
-    # Diagnostic switch: when True (Newton only), the env reset skips
-    # IK + asset randomization + grasp settle and just places the arm
-    # at a fixed home with the gripper closing. Useful for viewer /
-    # OSC probes; disabled in normal training.
-    simplified_newton_reset: bool = False
     ema_factor = 0.2
 
     pos_action_bounds = [0.05, 0.05, 0.05]

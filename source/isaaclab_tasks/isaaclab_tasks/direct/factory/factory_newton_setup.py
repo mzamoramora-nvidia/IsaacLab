@@ -103,8 +103,7 @@ def _model_init_callback(env: FactoryEnv) -> None:
     if builder is None:
         return
 
-    use_ik = _is_ik_mode(env)
-    _set_joint_target_mode(builder, use_ik=use_ik)
+    _set_joint_target_mode(builder)
     _set_ctrl_source_joint_target(builder)
     _set_per_dof_gravity_compensation(builder)
     _set_per_body_gravity_compensation(builder)
@@ -117,16 +116,6 @@ def _model_init_callback(env: FactoryEnv) -> None:
     # DOFs from the actuator cfg and overwrites any per-DOF builder writes
     # we make at those indices. The actuator-cfg path is the only reliable
     # way to apply armature to a parsed-USD articulation today.
-
-
-def _is_ik_mode(env: FactoryEnv) -> bool:
-    """Return True iff the Factory ctrl cfg requested IK control on Newton.
-
-    Defaults to OSC mode (which keeps arm DOFs in EFFORT mode so the
-    OSC's torque writes via ``Control.joint_f`` drive the arm directly).
-    """
-    ctrl_mode = getattr(env.cfg.ctrl, "newton_ctrl_mode", "osc")
-    return ctrl_mode == "ik"
 
 
 def _joint_label_indices(builder, name_substrs: list[str]) -> list[int]:
@@ -182,32 +171,15 @@ def _robot_body_indices(builder) -> list[int]:
     return [i for i, label in enumerate(builder.body_label) if _ROBOT_BODY_PATH_SUBSTR in label]
 
 
-def _set_joint_target_mode(builder, use_ik: bool) -> None:
+def _set_joint_target_mode(builder) -> None:
     """Force every robot DOF (arm + fingers) into POSITION mode.
 
-    The arm runs with ``joint_target_ke = 0`` (no spring), so the position
-    target has no effect on the arm — but ``joint_target_kd > 0`` then gives
-    mjwarp a per-joint ``-kd * qd`` damping term that kills the redundant-7th
-    DOF mode the OSC would otherwise have to chase. The OSC's own torques
-    written to ``Control.joint_f`` are added on top.
-
-    Pattern from ``newton/examples/robot/example_robot_panda_nut_bolt_osc.py``
-    (lines 1240-1270) — explicit comment there:
-
-        "A small joint_target_kd on the arm gives MuJoCo a -kd*qd damping
-        torque per joint, which kills the slow under-damped mode the
-        redundant 7th DOF would otherwise exhibit when the OSC tracks
-        a moving target."
-
-    Without this we leave the arm in the parser's EFFORT-mode default,
-    where mjwarp ignores ``joint_target_kd`` entirely and the OSC has
-    to provide all damping itself.
-
-    The ``use_ik`` argument is now redundant (POSITION mode is correct
-    for both control modes); kept for backwards compatibility with
-    existing callers.
+    With ``joint_target_ke = 0`` on the arm, the position target has no
+    effect on the arm; but ``joint_target_kd > 0`` then gives mjwarp a
+    per-joint ``-kd * qd`` damping term that kills the redundant-7th DOF
+    mode the OSC would otherwise have to chase. Pattern lifted from
+    ``newton/examples/robot/example_robot_panda_nut_bolt_osc.py``.
     """
-    del use_ik
     for dof_idx in _arm_dof_indices(builder) + _finger_dof_indices(builder):
         builder.joint_target_mode[dof_idx] = int(newton.JointTargetMode.POSITION)
 
