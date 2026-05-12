@@ -609,6 +609,10 @@ class FactoryEnv(DirectRLEnv):
 
         xy_dist = torch.linalg.vector_norm(target_held_base_pos[:, 0:2] - held_base_pos[:, 0:2], dim=1)
         z_disp = held_base_pos[:, 2] - target_held_base_pos[:, 2]
+        # NaN guards: a non-finite distance maps to "far" so the env is counted
+        # as not-yet-successful instead of poisoning the mask with NaN.
+        xy_dist = torch.nan_to_num(xy_dist, nan=1e6)
+        z_disp = torch.nan_to_num(z_disp, nan=1e6)
 
         is_centered = torch.where(xy_dist < 0.0025, torch.ones_like(curr_successes), torch.zeros_like(curr_successes))
         # Height threshold to target
@@ -709,6 +713,9 @@ class FactoryEnv(DirectRLEnv):
                 torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device).unsqueeze(0).repeat(self.num_envs, 1),
             )
         keypoint_dist = torch.linalg.norm(keypoints_held - keypoints_fixed, ord=2, dim=-1).mean(-1)
+        # NaN guard: a non-finite distance maps to "far" so the squashing-fn
+        # returns ~0 (no reward) for that env, instead of poisoning the batch.
+        keypoint_dist = torch.nan_to_num(keypoint_dist, nan=1e6, posinf=1e6, neginf=1e6)
 
         a0, b0 = self.cfg_task.keypoint_coef_baseline
         a1, b1 = self.cfg_task.keypoint_coef_coarse
