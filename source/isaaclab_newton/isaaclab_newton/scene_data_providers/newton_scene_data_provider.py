@@ -229,12 +229,55 @@ class NewtonSceneDataProvider(BaseSceneDataProvider):
             return None
 
     def get_contacts(self) -> dict[str, Any] | None:
-        """Return contact data for Newton provider.
+        """Return Newton's per-step contact buffer for the visualizer.
+
+        Eagerly runs ``solver.update_contacts(contacts, state)`` before
+        returning so the buffer reflects the current step. Without this
+        the captured CUDA graph keeps ``contacts.rigid_contact_count``
+        frozen at its capture-time value — usually zero or garbage —
+        and ``viewer.log_contacts`` dispatches a kernel with a bogus
+        ``dim`` that has frozen the GUI in earlier sessions.
 
         Returns:
-            ``None`` because contacts are not currently implemented in this provider.
+            ``{"contacts": newton.Contacts}`` when the Newton manager is
+            initialised and a contact buffer exists, otherwise ``None``.
         """
-        return None
+        try:
+            from isaaclab_newton.physics import NewtonManager
+        except ImportError:
+            return None
+
+        contacts = NewtonManager._contacts
+        state = NewtonManager._state_0
+        solver = NewtonManager._solver
+        if contacts is None or state is None:
+            return None
+        if solver is not None and hasattr(solver, "update_contacts"):
+            try:
+                solver.update_contacts(contacts, state)
+            except Exception as exc:
+                self._warn_once(
+                    "newton-update-contacts-failed",
+                    "[NewtonSceneDataProvider] solver.update_contacts() failed: %s",
+                    exc,
+                )
+        return {"contacts": contacts}
+
+    def get_collision_pipeline(self) -> Any | None:
+        """Return Newton's :class:`CollisionPipeline` for hydroelastic surface rendering.
+
+        Used by the visualizer to fetch
+        ``pipeline.hydroelastic_sdf.get_contact_surface()`` for the
+        "Show Hydro Surface" overlay. Returns ``None`` when the solver
+        does not need an external collision pipeline (e.g. when running
+        on the mjwarp solver with built-in collision detection — the
+        hydroelastic surface is not available in that case).
+        """
+        try:
+            from isaaclab_newton.physics import NewtonManager
+        except ImportError:
+            return None
+        return NewtonManager._collision_pipeline
 
     def get_camera_transforms(self) -> dict[str, Any] | None:
         """Return per-camera, per-environment transforms.

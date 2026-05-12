@@ -48,7 +48,6 @@ class NewtonViewerGL(ViewerGL):
         """
         super().__init__(*args, **kwargs)
         self._paused_training = False
-        self._paused_rendering = False
         self._metadata = metadata or {}
         self._fallback_draw_controls = False
         self._update_frequency = update_frequency
@@ -64,8 +63,15 @@ class NewtonViewerGL(ViewerGL):
         return self._paused_training
 
     def is_rendering_paused(self) -> bool:
-        """Return whether rendering is paused by viewer controls."""
-        return self._paused_rendering
+        """Return whether rendering is paused by viewer controls.
+
+        ``ViewerGL._paused`` is the source of truth — Newton's built-in
+        Space-key handler (``viewer_gl.py:1973``) and its own ``Pause``
+        checkbox both flip ``_paused`` directly, so a wrapper-side
+        cached copy would drift out of sync (the user-reported "Pause
+        Rendering button label doesn't update on Space" bug).
+        """
+        return bool(self._paused)
 
     def _render_training_controls(self, imgui):
         """Render Isaac Lab-specific control widgets in the Newton viewer UI."""
@@ -76,10 +82,11 @@ class NewtonViewerGL(ViewerGL):
         if imgui.button(pause_label):
             self._paused_training = not self._paused_training
 
-        rendering_label = "Resume Rendering" if self._paused_rendering else "Pause Rendering"
+        # Read the live ``_paused`` flag so the label matches whatever
+        # Space / Newton's built-in Pause checkbox last set it to.
+        rendering_label = "Resume Rendering" if self._paused else "Pause Rendering"
         if imgui.button(rendering_label):
-            self._paused_rendering = not self._paused_rendering
-            self._paused = self._paused_rendering
+            self._paused = not self._paused
 
         imgui.text("Visualizer Update Frequency")
         current_frequency = self._update_frequency
@@ -193,6 +200,10 @@ class NewtonViewerGL(ViewerGL):
 
                     show_contacts = self.show_contacts
                     changed, self.show_contacts = imgui.checkbox("Show Contacts", show_contacts)
+
+                    if hasattr(self, "show_hydro_contact_surface"):
+                        show_hydro = self.show_hydro_contact_surface
+                        changed, self.show_hydro_contact_surface = imgui.checkbox("Show Hydro Surface", show_hydro)
 
                     show_collision = self.show_collision
                     changed, self.show_collision = imgui.checkbox("Show Collision", show_collision)
@@ -389,6 +400,26 @@ class NewtonVisualizer(BaseVisualizer):
             else:
                 contacts = contacts_data
 
+        # Hydroelastic SDF contact surface ("isosurface") overlay. Fetched
+        # the same way as contacts: the visualizer pulls it from the
+        # scene-data provider and feeds it into the viewer's per-frame
+        # log call. The provider may not implement ``get_collision_pipeline``
+        # (e.g. PhysX-side providers) — in that case the overlay is a no-op.
+        hydro_surface = None
+        if (
+            getattr(self._viewer, "show_hydro_contact_surface", False)
+            and self._scene_data_provider is not None
+            and hasattr(self._scene_data_provider, "get_collision_pipeline")
+        ):
+            pipeline = self._scene_data_provider.get_collision_pipeline()
+            hydro_sdf = getattr(pipeline, "hydroelastic_sdf", None) if pipeline is not None else None
+            if hydro_sdf is not None and hasattr(hydro_sdf, "get_contact_surface"):
+                # Returns None when the pipeline was configured with
+                # ``output_contact_surface=False``. We still call
+                # ``log_hydro_contact_surface`` below so a None passes
+                # through to clear the prior frame's lines.
+                hydro_surface = hydro_sdf.get_contact_surface()
+
         update_frequency = self._viewer._update_frequency if self._viewer else self._update_frequency
         if self._step_counter % update_frequency != 0:
             return
@@ -407,6 +438,11 @@ class NewtonVisualizer(BaseVisualizer):
                             self._viewer.log_contacts(contacts, self._state)
                         except RuntimeError as exc:
                             logger.debug(f"[NewtonVisualizer] Failed to log contacts: {exc}")
+                    if hasattr(self._viewer, "log_hydro_contact_surface"):
+                        try:
+                            self._viewer.log_hydro_contact_surface(hydro_surface, penetrating_only=True)
+                        except RuntimeError as exc:
+                            logger.debug(f"[NewtonVisualizer] Failed to log hydro surface: {exc}")
                     if self.cfg.enable_markers:
                         render_newton_visualization_markers(
                             self._viewer, self._resolved_visible_env_ids, num_envs=num_envs
