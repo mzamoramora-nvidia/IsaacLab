@@ -70,11 +70,16 @@ def compute_dof_torque(
             task_wrench.sign() * (task_wrench.abs() - dead_zone_thresholds),
         )
 
+    # adapted from roboticsproceedings.org/rss07/p31.pdf
+
+    # useful tensors
     jacobian_T = torch.transpose(jacobian, dim0=1, dim1=2)
     arm_mass_matrix_inv = torch.inverse(arm_mass_matrix)
     arm_mass_matrix_task = torch.inverse(
         jacobian @ arm_mass_matrix_inv @ jacobian_T
     )  # ETH eq. 3.86; geometric Jacobian is assumed
+
+    # Set tau = J^T * tau, i.e., map tau into joint space as desired
     dof_torque[:, 0:7] = (jacobian_T @ task_wrench.unsqueeze(-1)).squeeze(-1)
 
     if not getattr(cfg.ctrl, "disable_nullspace", False):
