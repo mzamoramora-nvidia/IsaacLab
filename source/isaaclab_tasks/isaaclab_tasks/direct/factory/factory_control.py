@@ -77,17 +77,18 @@ def compute_dof_torque(
     )  # ETH eq. 3.86; geometric Jacobian is assumed
     dof_torque[:, 0:7] = (jacobian_T @ task_wrench.unsqueeze(-1)).squeeze(-1)
 
-    j_eef_inv = arm_mass_matrix_task @ jacobian @ arm_mass_matrix_inv
-    default_dof_pos_tensor = torch.tensor(cfg.ctrl.default_dof_pos_tensor, device=device).repeat((num_envs, 1))
-    # nullspace computation
-    distance_to_default_dof_pos = default_dof_pos_tensor - dof_pos[:, :7]
-    distance_to_default_dof_pos = (distance_to_default_dof_pos + math.pi) % (
-        2 * math.pi
-    ) - math.pi  # normalize to [-pi, pi]
-    u_null = cfg.ctrl.kd_null * -dof_vel[:, :7] + cfg.ctrl.kp_null * distance_to_default_dof_pos
-    u_null = arm_mass_matrix @ u_null.unsqueeze(-1)
-    torque_null = (torch.eye(7, device=device).unsqueeze(0) - jacobian_T @ j_eef_inv) @ u_null
-    dof_torque[:, 0:7] += torque_null.squeeze(-1)
+    if not getattr(cfg.ctrl, "disable_nullspace", False):
+        j_eef_inv = arm_mass_matrix_task @ jacobian @ arm_mass_matrix_inv
+        default_dof_pos_tensor = torch.tensor(cfg.ctrl.default_dof_pos_tensor, device=device).repeat((num_envs, 1))
+        # nullspace computation
+        distance_to_default_dof_pos = default_dof_pos_tensor - dof_pos[:, :7]
+        distance_to_default_dof_pos = (distance_to_default_dof_pos + math.pi) % (
+            2 * math.pi
+        ) - math.pi  # normalize to [-pi, pi]
+        u_null = cfg.ctrl.kd_null * -dof_vel[:, :7] + cfg.ctrl.kp_null * distance_to_default_dof_pos
+        u_null = arm_mass_matrix @ u_null.unsqueeze(-1)
+        torque_null = (torch.eye(7, device=device).unsqueeze(0) - jacobian_T @ j_eef_inv) @ u_null
+        dof_torque[:, 0:7] += torque_null.squeeze(-1)
 
     # TODO: Verify it's okay to no longer do gripper control here.
     dof_torque = torch.clamp(dof_torque, min=-100.0, max=100.0)

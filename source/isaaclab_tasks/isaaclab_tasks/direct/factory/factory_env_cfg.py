@@ -76,6 +76,16 @@ class CtrlCfg:
     kp_null = 10.0
     kd_null = 6.3246
 
+    # When True, skip the OSC null-space term in :func:`factory_control.compute_dof_torque`.
+    # Default ``False`` keeps the original Factory PhysX behaviour (null-space on);
+    # :meth:`FactoryEnv.__init__` overrides it to ``True`` on Newton, matching the
+    # ``newton/examples/robot/example_robot_panda_nut_bolt_osc.py`` reference
+    # (``enable_nullspace=False``) — the null-space target ``default_dof_pos_tensor``
+    # does not match the IK-converged "above bolt" arm config the env actually
+    # holds, so leaving null-space on leaks a constant TCP-direction torque under
+    # Newton's mjwarp OSC integration.
+    disable_nullspace: bool = False
+
 
 @configclass
 class FactoryPhysicsCfg(PresetCfg):

@@ -136,6 +136,11 @@ class FactoryEnv(DirectRLEnv):
             cfg.sim.dt = 1.0 / 240.0
             cfg.decimation = 16
 
+            # Disable the OSC null-space term on Newton. Matches the
+            # ``newton/examples/robot/example_robot_panda_nut_bolt_osc.py``
+            # reference; PhysX defaults are unchanged.
+            cfg.ctrl.disable_nullspace = True
+
             kinematic_for = {"fixed_asset", "small_gear_cfg", "large_gear_cfg"}
             for asset_attr in ("fixed_asset", "held_asset", "small_gear_cfg", "large_gear_cfg"):
                 asset_cfg = getattr(self.cfg_task, asset_attr, None)
