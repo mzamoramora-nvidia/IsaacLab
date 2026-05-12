@@ -10,17 +10,15 @@ This module is the Newton companion to :mod:`factory_control`. The OSC math
 feeds it via ``root_view.get_jacobians()`` / ``get_generalized_mass_matrices()``.
 On Newton those APIs do not exist, but :class:`newton.selection.ArticulationView`
 exposes equivalent ``eval_jacobian`` / ``eval_mass_matrix`` calls. This module
-adapts those into the shape Factory's OSC math expects, plus two patches that
-the panda-osc reference (newton repo, ``newton/examples/robot/osc.py``)
-showed are required for parity:
+adapts those into the shape Factory's OSC math expects, plus two patches
+required for parity:
 
 1. The arm jacobian must average the left/right finger body jacobians,
    matching the PhysX path's ``(left + right) * 0.5`` semantics.
 2. ``ArticulationView.eval_mass_matrix`` returns ``J^T M J`` only — it does
    *not* fold ``joint_armature`` into ``H``'s diagonal. We add it here at the
-   consumer site. See newton/examples/robot/osc.py:615 for the same patch in
-   the upstream OSC reference. Lift into ``eval_mass_matrix`` once it lands
-   upstream and remove this patch.
+   consumer site; lift into ``eval_mass_matrix`` once it lands upstream and
+   remove this patch.
 """
 
 from __future__ import annotations
@@ -33,11 +31,10 @@ from isaaclab_newton.physics import NewtonManager
 from newton import eval_fk
 
 # Per-joint torque ceiling for the Franka FR3 (datasheet). Matches the
-# ``effort_limit_sim`` values in ``isaaclab_assets.robots.franka``.
-# Used by :func:`clamp_to_effort_limits` on the Newton path because Newton's
+# ``effort_limit_sim`` values in ``isaaclab_assets.robots.franka``. Used by
+# :func:`clamp_to_effort_limits` on the Newton path because Newton's
 # articulation drive does not enforce ``effort_limit_sim`` on direct
-# ``joint_f`` writes (the panda-osc reference reproduces this same clamp at
-# its consumer site, ``newton/examples/robot/osc.py:556``).
+# ``joint_f`` writes.
 FRANKA_FR3_EFFORT_LIMITS: tuple[float, ...] = (87.0, 87.0, 87.0, 87.0, 12.0, 12.0, 12.0)
 
 
@@ -375,9 +372,8 @@ class NewtonRobotIKSolver:
       no contact pipeline.
     * Solves N IK problems (one per env) in parallel inside its own
       captured CUDA graph; each :meth:`solve` call is a single graph replay.
-    * Uses Levenberg-Marquardt with analytic Jacobians, which is what the
-      panda-osc / cube-stacking newton examples use to reach sub-mm
-      convergence.
+    * Uses Levenberg-Marquardt with analytic Jacobians to reach sub-mm
+      convergence in a small number of iterations.
 
     PhysX is unaffected — this class is only constructed on the Newton path.
     """

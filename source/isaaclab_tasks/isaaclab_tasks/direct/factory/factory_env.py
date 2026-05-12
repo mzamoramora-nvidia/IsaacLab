@@ -115,17 +115,15 @@ class FactoryEnv(DirectRLEnv):
         if _is_newton_backend(cfg):
             # Newton runs the physics solver at 240 Hz (vs 120 Hz on PhysX) with
             # ``decimation = 16`` so the effective control rate stays at 15 Hz.
-            # Smaller physics_dt = fresher contact set each step, which removes
-            # the need for the panda-nut-bolt OSC example's per-substep collide
-            # passes for stiff hydroelastic threading. PhysX defaults
-            # (``dt = 1/120``, ``decimation = 8``) are preserved by the
-            # ``FactoryEnvCfg.sim``/``FactoryEnvCfg.decimation`` shared defaults.
+            # Smaller physics_dt = fresher contact set each step for stiff
+            # hydroelastic threading. PhysX defaults (``dt = 1/120``,
+            # ``decimation = 8``) are preserved by the shared
+            # ``FactoryEnvCfg.sim`` / ``FactoryEnvCfg.decimation``.
             cfg.sim.dt = 1.0 / 240.0
             cfg.decimation = 16
 
-            # Disable the OSC null-space term on Newton. Matches the
-            # ``newton/examples/robot/example_robot_panda_nut_bolt_osc.py``
-            # reference; PhysX defaults are unchanged.
+            # Disable the OSC null-space term on Newton (see ``CtrlCfg``);
+            # PhysX defaults are unchanged.
             cfg.ctrl.disable_nullspace = True
 
             kinematic_for = {"fixed_asset", "small_gear_cfg", "large_gear_cfg"}
@@ -156,10 +154,9 @@ class FactoryEnv(DirectRLEnv):
                 self.cfg_task.fixed_asset = bolt.replace(init_state=new_init)
             # Bump arm actuator armature *before* ``super().__init__`` so the
             # ImplicitActuatorCfg values get baked into ``model.joint_armature``
-            # at finalize time (which otherwise resets the builder's per-DOF
-            # armature back to the cfg default of 0.0). Numbers from the
-            # ``mzamora/newton-dev`` Factory branch — they stabilise the
-            # OSC's ``Lambda = (J H^-1 J^T)^-1`` and damp wrist chatter.
+            # at finalize time (otherwise the builder's per-DOF armature falls
+            # back to 0.0). Armature stabilises the OSC's
+            # ``Lambda = (J H^-1 J^T)^-1`` and damps wrist chatter.
             arm_actuators = cfg.robot.actuators
             arm_actuators["panda_arm1"].armature = 0.3
             arm_actuators["panda_arm2"].armature = 0.11
@@ -410,8 +407,6 @@ class FactoryEnv(DirectRLEnv):
 
             v_link = v_com + omega x (p_link - p_com)
 
-        Mirrors the kernel at ``newton/examples/robot/osc.py:96-100``.
-
         Returns:
             Tuple ``(linvel, angvel)``, each ``(num_envs, 3)`` torch
             tensors on the robot device, in world frame at the
@@ -524,8 +519,7 @@ class FactoryEnv(DirectRLEnv):
             # (transport-corrected) on ``panda_fingertip_centered`` -- a
             # zero-mass virtual body. mjwarp ``state.body_qd`` does have
             # the real velocity for that body, so we read it directly and
-            # apply the transport ourselves (matches the working pattern
-            # in ``newton/examples/robot/osc.py:96-100``).
+            # apply the transport ourselves.
             self.fingertip_midpoint_linvel, self.fingertip_midpoint_angvel = (
                 self._compute_fingertip_velocity_from_newton_state()
             )
@@ -751,8 +745,7 @@ class FactoryEnv(DirectRLEnv):
         # Newton's articulation drive does not enforce per-joint effort_limit_sim
         # on direct joint_f writes (PhysX does). Without this clamp, OSC torque
         # saturation produces 100 N·m on the wrist (factory_control.compute_dof_torque's
-        # global ±100 ceiling) instead of the FR3 datasheet 12 N·m. Same patch
-        # the panda-osc reference applies at osc.py:556.
+        # global ±100 ceiling) instead of the FR3 datasheet 12 N·m.
         if self._newton_osc_buffers is not None:
             from . import factory_control_newton
 

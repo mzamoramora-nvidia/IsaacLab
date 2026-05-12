@@ -42,7 +42,7 @@ _FINGER_JOINT_NAMES = ["panda_finger_joint1", "panda_finger_joint2"]
 _ROBOT_BODY_PATH_SUBSTR = "/Robot/"
 
 # Arm DOF armature [kg·m²]; stabilises the OSC ``Lambda`` and damps wrist
-# chatter. Values lifted from the panda-osc reference / mzamora/newton-dev.
+# chatter.
 _ARM_ARMATURE = (0.3, 0.3, 0.3, 0.3, 0.11, 0.11, 0.11)
 _FINGER_ARMATURE = 0.15
 
@@ -147,8 +147,7 @@ def _set_joint_target_mode(builder) -> None:
     With ``joint_target_ke = 0`` on the arm, the position target has no
     effect on the arm; but ``joint_target_kd > 0`` then gives mjwarp a
     per-joint ``-kd * qd`` damping term that kills the redundant-7th DOF
-    mode the OSC would otherwise have to chase. Pattern lifted from
-    ``newton/examples/robot/example_robot_panda_nut_bolt_osc.py``.
+    mode the OSC would otherwise have to chase.
     """
     for dof_idx in _arm_dof_indices(builder) + _finger_dof_indices(builder):
         builder.joint_target_mode[dof_idx] = int(newton.JointTargetMode.POSITION)
@@ -162,8 +161,6 @@ def _set_ctrl_source_joint_target(builder) -> None:
     ``set_joint_position_target_index`` writes) instead of the unused
     ``Control.mujoco.ctrl`` array. Required for the POSITION-mode arm
     to actually consume our position targets.
-
-    Same pattern as ``example_robot_panda_nut_bolt_osc.py:1268-1270``.
     """
     from newton.solvers import SolverMuJoCo
 
@@ -187,13 +184,7 @@ def _filter_base_table_contacts(builder) -> None:
     contact between the base collision mesh and the table top surface every
     step, even when there's no physical interpenetration. Those tiny contact
     forces propagate through the kinematic chain and show up as
-    multi-millimeter TCP drift during OSC hold (verified via
-    ``scripts/probe_active_contacts.py``: 98 active contacts on R0 hold,
-    including ``Table <-> panda_link0`` firing every tick).
-
-    Mirrors the pattern used by ``newton/examples/robot/example_robot_panda_osc.py``
-    (lines 334-339), which filters base ↔ ground at scene-build time. On our
-    setup we filter base ↔ table.
+    multi-millimeter TCP drift during OSC hold.
     """
     base_suffixes = ("/panda_link0", "/panda_link1")
     table_substr = "/Table"
@@ -221,9 +212,7 @@ def _tune_nut_bolt_contacts(builder) -> None:
 
     Newton's parser defaults are too soft for the threading task: the gripper
     bounces off the nut. ``ke``/``kd`` lift normal stiffness/damping ~1-2 orders
-    of magnitude; ``mu`` lands on values that combine via mjwarp's pair
-    ``max(mu_a, mu_b)`` rule into the panda-nut-bolt OSC reference's effective
-    frictions while staying above ``MJ_MINMU`` to silence the NaN-risk warning.
+    of magnitude; ``mu`` stays above ``MJ_MINMU`` to silence the NaN-risk warning.
     """
     if not all(hasattr(builder, attr) for attr in ("shape_label", "shape_material_mu", "shape_gap")):
         return
@@ -242,15 +231,15 @@ def _tune_nut_bolt_contacts(builder) -> None:
 
 
 # ---------------------------------------------------------------------------
-# SDF / hydroelastic collision setup. Mirrors the panda-nut-bolt OSC reference:
-#   * fingers — 192-cube SDF + HYDROELASTIC, kh=1e10 (soft pads), condim=4.
+# SDF / hydroelastic collision setup:
+#   * fingers — 192-cube SDF + HYDROELASTIC, kh=1e11, condim=4.
 #   * nut/bolt — 256-cube SDF + HYDROELASTIC, kh=1e11 (rigid thread features).
 #   * other panda links — 64-cube SDF only, used for fast distance lookups.
 # Builder-time only; the NewtonCfg (use_mujoco_contacts=False +
 # sdf_hydroelastic_config) is what actually engages the hydroelastic forces.
 # ---------------------------------------------------------------------------
 
-# SDF resolutions (cube edge). Match panda-nut-bolt's profile.
+# SDF resolutions (cube edge).
 _SDF_RES_FINGER = 192
 _SDF_RES_NUT_BOLT = 256
 _SDF_RES_PANDA = 64
@@ -266,14 +255,10 @@ _SDF_BAND_PANDA = (-0.01, 0.01)
 # be deep inside the table.
 _SDF_BAND_TABLE = (-0.005, 0.02)
 
-# Hydroelastic stiffness [Pa/m].
-# panda-nut-bolt-osc default is 1e11 everywhere (rigid fingers + nut + bolt);
-# factory-sim2sim policy-rollout drops finger kh to 1e10 so the pads
-# compress sub-mm against the nut SDF for a one-shot grasp init.
-# We follow the OSC profile here because Factory's PD finger close is
-# aggressive — at 1e10 the finger SDF was visibly punching through the
-# nut SDF since hydroelastic counter-force / penetration_volume was
-# too low to push back ~187 N of finger PD force.
+# Hydroelastic stiffness [Pa/m]. Rigid fingers + nut + bolt (1e11): at smaller
+# values the finger SDF visibly punches through the nut SDF since the
+# hydroelastic counter-force / penetration_volume can't push back the
+# ~187 N from the finger PD close.
 _KH_FINGER = 1e11
 _KH_NUT_BOLT = 1e11
 

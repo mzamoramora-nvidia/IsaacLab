@@ -78,12 +78,10 @@ class CtrlCfg:
 
     # When True, skip the OSC null-space term in :func:`factory_control.compute_dof_torque`.
     # Default ``False`` keeps the original Factory PhysX behaviour (null-space on);
-    # :meth:`FactoryEnv.__init__` overrides it to ``True`` on Newton, matching the
-    # ``newton/examples/robot/example_robot_panda_nut_bolt_osc.py`` reference
-    # (``enable_nullspace=False``) — the null-space target ``default_dof_pos_tensor``
-    # does not match the IK-converged "above bolt" arm config the env actually
-    # holds, so leaving null-space on leaks a constant TCP-direction torque under
-    # Newton's mjwarp OSC integration.
+    # :meth:`FactoryEnv.__init__` overrides it to ``True`` on Newton because the
+    # null-space target ``default_dof_pos_tensor`` does not match the IK-converged
+    # "above bolt" arm config the env actually holds, so leaving null-space on
+    # leaks a constant TCP-direction torque under Newton's mjwarp OSC integration.
     disable_nullspace: bool = False
 
 
@@ -92,12 +90,11 @@ class FactoryPhysicsCfg(PresetCfg):
     """Per-backend physics cfg for Factory tasks.
 
     PhysX preserves the original Factory tuning. Newton uses the MuJoCo-Warp
-    solver with parameters seeded from the panda-osc reference work
-    (``newton/examples/robot/example_robot_panda_factory_policy_rollout.py``):
+    solver:
 
     * ``integrator='implicitfast'`` — better stability for contact-rich scenes.
     * ``cone='elliptic'``, ``impratio=10`` — friction-vs-normal coupling tuned
-      for finger-on-nut/bolt threading (panda-osc commit ``e16ac397``).
+      for finger-on-nut/bolt threading.
     * ``use_mujoco_contacts=False`` — routes hydroelastic contacts into the
       MuJoCo solver so ``moment_matching`` / ``anchor_contact`` actually engage.
     * ``njmax`` / ``nconmax`` raised vs default to fit threading-pair contacts.
@@ -148,9 +145,7 @@ class FactoryPhysicsCfg(PresetCfg):
         # 2 solver substeps per 4.17 ms physics tick (Newton runs at
         # 240 Hz; see :class:`FactoryEnv.__init__`) → 2.08 ms substep
         # dt. Stiff hydroelastic + penalty contacts then see a fresh
-        # collision set every 4.17 ms; the panda-nut-bolt OSC example
-        # achieves the same freshness with per-substep collide passes
-        # at a longer physics_dt.
+        # collision set every 4.17 ms.
         num_substeps=2,
         use_cuda_graph=True,
     )
