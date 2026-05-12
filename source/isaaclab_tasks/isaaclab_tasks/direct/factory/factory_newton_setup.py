@@ -41,11 +41,6 @@ _FINGER_JOINT_NAMES = ["panda_finger_joint1", "panda_finger_joint2"]
 # belonging to the Franka under the IsaacLab USD layout.
 _ROBOT_BODY_PATH_SUBSTR = "/Robot/"
 
-# Arm DOF armature [kg·m²]; stabilises the OSC ``Lambda`` and damps wrist
-# chatter.
-_ARM_ARMATURE = (0.3, 0.3, 0.3, 0.3, 0.11, 0.11, 0.11)
-_FINGER_ARMATURE = 0.15
-
 
 def register_model_init_callback() -> None:
     """Wire a Newton MODEL_INIT callback that mutates the builder."""
@@ -266,11 +261,6 @@ _KH_NUT_BOLT = 1e11
 _FINGER_MU_TORSIONAL = 0.1
 _FINGER_CONDIM = 4
 
-_FINGER_BODY_NAMES = ("panda_leftfinger", "panda_rightfinger")
-_NUT_BODY_SUBSTRS = ("HeldAsset/factory_nut_loose",)
-_BOLT_BODY_SUBSTRS = ("FixedAsset/factory_bolt_loose",)
-_TABLE_BODY_SUBSTRS = ("/Table",)
-
 
 def _build_collision_sdfs(builder) -> None:
     """Build SDFs on Factory's collision meshes for hydroelastic contacts.
@@ -285,10 +275,11 @@ def _build_collision_sdfs(builder) -> None:
     re-bake the SDF grids. Multiple shapes can share the same mesh,
     but mesh.build_sdf is only called once per unique mesh.
     """
-    finger_body_idxs = {i for i, label in enumerate(builder.body_label) if any(n in label for n in _FINGER_BODY_NAMES)}
-    nut_body_idxs = {i for i, label in enumerate(builder.body_label) if any(s in label for s in _NUT_BODY_SUBSTRS)}
-    bolt_body_idxs = {i for i, label in enumerate(builder.body_label) if any(s in label for s in _BOLT_BODY_SUBSTRS)}
-    table_body_idxs = {i for i, label in enumerate(builder.body_label) if any(s in label for s in _TABLE_BODY_SUBSTRS)}
+    finger_names = ("panda_leftfinger", "panda_rightfinger")
+    finger_body_idxs = {i for i, label in enumerate(builder.body_label) if any(n in label for n in finger_names)}
+    nut_body_idxs = {i for i, label in enumerate(builder.body_label) if "HeldAsset/factory_nut_loose" in label}
+    bolt_body_idxs = {i for i, label in enumerate(builder.body_label) if "FixedAsset/factory_bolt_loose" in label}
+    table_body_idxs = {i for i, label in enumerate(builder.body_label) if "/Table" in label}
     panda_body_idxs = set(_robot_body_indices(builder)) - finger_body_idxs
 
     meshlike = (newton.GeoType.MESH, newton.GeoType.CONVEX_MESH)
