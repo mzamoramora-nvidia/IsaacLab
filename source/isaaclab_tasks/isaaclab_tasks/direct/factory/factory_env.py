@@ -566,10 +566,7 @@ class FactoryEnv(DirectRLEnv):
         j_lin = torch.cross(joint_axes, r, dim=-1)  # (N, 7, 3)
 
         j_arm = torch.cat([j_lin.permute(0, 2, 1), joint_axes.permute(0, 2, 1)], dim=1)
-        # ``torch.nan_to_num`` here is defensive — Newton occasionally returns
-        # NaN body_q during contact blow-ups; bringing those into the
-        # Jacobian explodes the OSC.
-        return torch.nan_to_num(j_arm, nan=0.0, posinf=0.0, neginf=0.0)
+        return j_arm
 
     def _compute_intermediate_values(self, dt):
         """Get values computed from raw tensors. This includes adding noise."""
@@ -684,15 +681,6 @@ class FactoryEnv(DirectRLEnv):
 
         obs_tensors = factory_utils.collapse_obs_dict(obs_dict, self.cfg.obs_order + ["prev_actions"])
         state_tensors = factory_utils.collapse_obs_dict(state_dict, self.cfg.state_order + ["prev_actions"])
-        # Defensive NaN/Inf guard on Newton: a contact blow-up can corrupt
-        # ``joint_q`` / ``body_q`` mid-rollout, propagating to ``ee_*_fd``
-        # and then into the policy's log-std, which crashes ``rl_games``
-        # with ``normal expects all elements of std >= 0``. Map any
-        # non-finite entry to zero so the bad sample is benign and the
-        # next reset clears the env. PhysX runs are unaffected.
-        if self._newton_osc_buffers is not None:
-            obs_tensors = torch.nan_to_num(obs_tensors, nan=0.0, posinf=0.0, neginf=0.0)
-            state_tensors = torch.nan_to_num(state_tensors, nan=0.0, posinf=0.0, neginf=0.0)
         return {"policy": obs_tensors, "critic": state_tensors}
 
     def _reset_buffers(self, env_ids):
@@ -832,13 +820,8 @@ class FactoryEnv(DirectRLEnv):
             from . import factory_control_newton
 
             factory_control_newton.clamp_to_effort_limits(self.joint_torque)
-            # Defensive: if the OSC produced NaN/Inf (singular mass matrix,
-            # degenerate Jacobian, blow-up from a previous step) clamp the
-            # offending entries to zero before they reach the actuator.
-            # Without this guard the bad torque feeds back into joint_q,
-            # then into observations, and the policy log_std silently goes
-            # to NaN, which crashes ``rl_games`` mid-rollout with the
-            # ``normal expects all elements of std >= 0`` assertion.
+            # Last-line guard against an OSC blow-up (singular mass matrix /
+            # degenerate Jacobian) corrupting the actuator input on Newton.
             self.joint_torque = torch.nan_to_num(self.joint_torque, nan=0.0, posinf=0.0, neginf=0.0)
 
         self._robot.set_joint_position_target_index(target=self.ctrl_target_joint_pos)

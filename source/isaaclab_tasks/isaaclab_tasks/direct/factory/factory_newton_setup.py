@@ -23,9 +23,12 @@ PhysX runs never import this module.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 import newton
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .factory_env import FactoryEnv
@@ -230,7 +233,7 @@ def _filter_base_table_contacts(builder) -> None:
         for table_i in table_shape_idxs:
             pair = (min(base_i, table_i), max(base_i, table_i))
             builder.shape_collision_filter_pairs.append(pair)
-    print(f"[factory-newton] filtered {len(base_shape_idxs) * len(table_shape_idxs)} base↔table collision pairs")
+    logger.info("Filtered %d base<->table collision pairs.", len(base_shape_idxs) * len(table_shape_idxs))
 
 
 def _tune_nut_bolt_contacts(builder) -> None:
@@ -441,10 +444,15 @@ def _build_collision_sdfs(builder) -> None:
             if condim_attr is not None:
                 condim_attr.values[shape_idx] = _FINGER_CONDIM
 
-    print(
-        f"[factory-newton] built SDFs: finger={counts['finger']}, nut={counts['nut']}, "
-        f"bolt={counts['bolt']}, panda={counts['panda']}, table={counts['table']} "
-        f"(skipped: no_mesh={counts['skip_no_mesh']}, already_built={counts['skip_already_built']})"
+    logger.info(
+        "Built SDFs: finger=%d nut=%d bolt=%d panda=%d table=%d (skipped: no_mesh=%d, already_built=%d).",
+        counts["finger"],
+        counts["nut"],
+        counts["bolt"],
+        counts["panda"],
+        counts["table"],
+        counts["skip_no_mesh"],
+        counts["skip_already_built"],
     )
 
 
