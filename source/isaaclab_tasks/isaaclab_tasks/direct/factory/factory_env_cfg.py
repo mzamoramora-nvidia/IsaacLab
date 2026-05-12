@@ -9,6 +9,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg
+from isaaclab.envs.common import ViewerCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
@@ -119,6 +120,11 @@ class FactoryEnvCfg(DirectRLEnvCfg):
     )
 
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=128, env_spacing=2.0, clone_in_fabric=True)
+
+    viewer: ViewerCfg = ViewerCfg(
+        eye=(0.85, 0.35, 0.3),
+        lookat=(0.55, 0.0, 0.05),
+    )
 
     robot = ArticulationCfg(
         prim_path="/World/envs/env_.*/Robot",

@@ -249,6 +249,11 @@ class PhysxManager(PhysicsManager):
             cls._update_fabric(0.0, 0.0)
 
     @classmethod
+    def pre_render(cls) -> None:
+        """Sync physics state to Fabric so Kit cameras see updated transforms."""
+        cls.forward()
+
+    @classmethod
     def step(cls) -> None:
         """Step the physics simulation."""
         sim = PhysicsManager._sim
