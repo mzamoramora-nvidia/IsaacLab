@@ -129,6 +129,17 @@ def main() -> None:
         sentinel = args_cli.num_steps + 1  # "never" marker for argmax-based tracking
         first_engage = torch.full((num_envs,), sentinel, dtype=torch.long, device=device)
         first_success = torch.full((num_envs,), sentinel, dtype=torch.long, device=device)
+        # Track ep_succeeded right before each auto-reset (training-style terminal metric).
+        # Hook the env's _reset_idx so we capture ep_succeeded just before it's cleared.
+        terminal_success_counts: list[float] = []
+        original_reset_idx = e._reset_idx
+
+        def _hook_reset_idx(env_ids):
+            if len(env_ids) == e.num_envs:
+                terminal_success_counts.append(float(e.ep_succeeded.float().mean().item()))
+            return original_reset_idx(env_ids)
+
+        e._reset_idx = _hook_reset_idx
 
         obs = env.reset()
         if isinstance(obs, dict):
@@ -174,15 +185,22 @@ def main() -> None:
             f"num_steps={args_cli.num_steps} ckpt={os.path.basename(resume_path)}",
             flush=True,
         )
+        # Training-style "did the policy succeed at least once before timeout?" averaged
+        # across all completed episodes during the eval window.
+        mean_terminal = (
+            sum(terminal_success_counts) / len(terminal_success_counts) if terminal_success_counts else float("nan")
+        )
         print(
             f"[eval] success_rate={success_rate:.3f}  engage_rate={engage_rate:.3f}  "
+            f"terminal_success_rate={mean_terminal:.3f} ({len(terminal_success_counts)} eps)  "
             f"mean_engage_step={mean_engage_step:.1f}  mean_success_step={mean_success_step:.1f}  "
             f"fps={fps:.1f}",
             flush=True,
         )
         print(
             f"CSV,{args_cli.label},{backend},{success_rate:.4f},{engage_rate:.4f},"
-            f"{mean_engage_step:.2f},{mean_success_step:.2f},{fps:.2f}",
+            f"{mean_engage_step:.2f},{mean_success_step:.2f},{fps:.2f},"
+            f"terminal_success_rate={mean_terminal:.4f}",
             flush=True,
         )
 
