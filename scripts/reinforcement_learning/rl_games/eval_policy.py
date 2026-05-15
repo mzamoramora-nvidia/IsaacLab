@@ -120,7 +120,7 @@ def main() -> None:
         agent.restore(resume_path)
         agent.reset()
 
-        backend = "newton" if bool(getattr(env.unwrapped, "_newton_osc_buffers", None) is not None) else "physx"
+        backend = "newton" if bool(getattr(env.unwrapped, "_is_newton", False)) else "physx"
 
         # Reset and roll the deterministic policy. Track first-engage / first-success step per env.
         e = env.unwrapped
