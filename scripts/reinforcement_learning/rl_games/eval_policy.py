@@ -149,11 +149,13 @@ def main() -> None:
         first_success = torch.full((num_envs,), sentinel, dtype=torch.long, device=device)
         # Track ep_succeeded right before each auto-reset (training-style terminal metric).
         # Hook the env's _reset_idx so we capture ep_succeeded just before it's cleared.
+        # Skip the initial ``env.reset()`` call at the start of the rollout (no episode has
+        # run yet, episode_length_buf is all zero) so the average isn't pulled toward 0.
         terminal_success_counts: list[float] = []
         original_reset_idx = e._reset_idx
 
         def _hook_reset_idx(env_ids):
-            if len(env_ids) == e.num_envs:
+            if len(env_ids) == e.num_envs and int(e.episode_length_buf.max().item()) > 0:
                 terminal_success_counts.append(float(e.ep_succeeded.float().mean().item()))
             return original_reset_idx(env_ids)
 
