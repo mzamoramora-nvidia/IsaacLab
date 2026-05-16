@@ -63,6 +63,16 @@ parser.add_argument(
     action="store_true",
     help="(Newton only) overlay the hydroelastic SDF contact surface (the 'isosurface').",
 )
+parser.add_argument(
+    "--show_contacts",
+    action="store_true",
+    help=(
+        "(Newton only) overlay contact-point arrows. The viewer flag is set unconditionally, "
+        "but actual arrow drawing requires the recorder to forward contacts to "
+        "``viewer.log_contacts`` — currently no-op pending the hydro-surface-viz port to "
+        "the post-PR-#5128 SceneDataProvider."
+    ),
+)
 add_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 args_cli.enable_cameras = True
@@ -142,7 +152,12 @@ def main():
         # reach into the viewer; on the Kit/RTX recorder backend
         # ``_capture`` is a different class, so the inner ``_viewer``
         # attribute simply won't exist and we skip silently.
-        if args_cli.show_collision or args_cli.enable_wireframe or args_cli.show_hydro_contact_surface:
+        if (
+            args_cli.show_collision
+            or args_cli.enable_wireframe
+            or args_cli.show_hydro_contact_surface
+            or args_cli.show_contacts
+        ):
             recorder = getattr(env_unwrapped, "video_recorder", None)
             capture = getattr(recorder, "_capture", None)
             if capture is not None and hasattr(capture, "update_camera"):
@@ -155,10 +170,13 @@ def main():
                         viewer.renderer.draw_wireframe = True
                     if args_cli.show_hydro_contact_surface and hasattr(viewer, "show_hydro_contact_surface"):
                         viewer.show_hydro_contact_surface = True
+                    if args_cli.show_contacts:
+                        viewer.show_contacts = True
                     _p(
                         f"viewer flags applied: show_collision={args_cli.show_collision} "
                         f"wireframe={args_cli.enable_wireframe} "
-                        f"show_hydro_contact_surface={args_cli.show_hydro_contact_surface}"
+                        f"show_hydro_contact_surface={args_cli.show_hydro_contact_surface} "
+                        f"show_contacts={args_cli.show_contacts}"
                     )
 
         obs = env.reset()
