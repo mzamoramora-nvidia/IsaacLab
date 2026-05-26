@@ -21,6 +21,11 @@ There are **two** video-capture scripts:
 | Record (no frames) | `play_full_video.py … --checkpoint <ckpt>` | `play_full_video.py … --checkpoint <ckpt> presets=newton` |
 | Record (with frames) | `play_full_video_with_frames.py … --checkpoint <ckpt>` | `play_full_video_with_frames.py … --checkpoint <ckpt> presets=newton` |
 
+> **Vanilla SDF (no hydroelastic):** wherever `presets=newton` appears
+> below, swap it for `presets=newton_sdf`. Same scripts, same flags —
+> the preset just selects a different Newton cfg branch (10 substeps,
+> re-collide every substep, `sdf_hydroelastic_config=None`).
+
 ## 1. Train a policy
 
 ### PhysX
@@ -61,6 +66,27 @@ There are **two** video-capture scripts:
   vs. holding pose.
 - 30 iter is a smoke check — it does not converge yet on Newton with
   current cfg (`success_rate = 0` at iter 30, under investigation).
+
+### Newton (vanilla SDF, no hydroelastic)
+
+```bash
+./isaaclab.sh -p scripts/reinforcement_learning/rl_games/train.py \
+    --task Isaac-Factory-NutThread-Direct-v0 \
+    --num_envs 128 \
+    --max_iterations 200 \
+    --headless \
+    --seed 0 \
+    presets=newton_sdf
+```
+
+- Same script and flags as the Newton hydroelastic recipe above; the
+  only change is `presets=newton_sdf`.
+- The preset auto-selects denser substepping (`num_substeps=10`,
+  `collision_decimation=1`) which vanilla SDF needs to keep contacts
+  stable through the tick.
+- Hydroelastic is disabled at the cfg level
+  (`sdf_hydroelastic_config=None`), so finger contact relies on the
+  penalty-spring response only.
 
 ### Common
 
