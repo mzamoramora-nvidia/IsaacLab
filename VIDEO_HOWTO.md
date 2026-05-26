@@ -1,9 +1,10 @@
 # How to train + record a Factory policy video (PhysX or Newton)
 
-Step-by-step recipe verified on `dev/mzamoramora/nut-thread-newton`,
-warp 1.13, isaacsim with `omni.replicator.core-1.13.4`. Both backends
-share the same training and video-capture scripts — the only
-difference is appending `presets=newton` to the command line.
+Step-by-step recipe verified on `nut-thread-newton`, warp 1.13,
+isaacsim with `omni.replicator.core-1.13.4`. Both backends share the
+same training and video-capture scripts — the only difference is
+appending `presets=newton` (hydroelastic SDF) or `presets=newton_sdf`
+(vanilla SDF, no hydroelastic) to the command line.
 
 There are **two** video-capture scripts:
 

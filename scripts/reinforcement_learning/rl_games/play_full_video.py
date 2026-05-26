@@ -73,15 +73,6 @@ parser.add_argument(
         "the post-PR-#5128 SceneDataProvider."
     ),
 )
-parser.add_argument(
-    "--newton_sdf_only",
-    action="store_true",
-    help=(
-        "(Newton only) Run the SDF-only penalty-spring contact mode by nulling "
-        "``sdf_hydroelastic_config``. Same Python-side mutation as ``eval_policy.py`` since "
-        "Hydra struct-mode rejects the equivalent CLI override against PresetCfg."
-    ),
-)
 add_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 args_cli.enable_cameras = True
@@ -100,15 +91,6 @@ def main():
         env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
         agent_cfg["params"]["seed"] = args_cli.seed
         env_cfg.seed = args_cli.seed
-
-        if args_cli.newton_sdf_only:
-            physics = getattr(env_cfg.sim, "physics", None)
-            for candidate in (getattr(physics, "newton", None), physics):
-                cc = getattr(candidate, "collision_cfg", None)
-                if cc is not None and hasattr(cc, "sdf_hydroelastic_config"):
-                    cc.sdf_hydroelastic_config = None
-                    _p(f"env_cfg: sdf_hydroelastic_config nulled via {type(candidate).__name__}")
-                    break
 
         # The Factory Newton cfg ships with ``output_contact_surface=False``
         # to save compute, but the viewer's "Show Hydro Surface" overlay

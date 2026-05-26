@@ -75,16 +75,6 @@ parser.add_argument("--num_steps", type=int, default=150, help="Policy ticks per
 parser.add_argument("--checkpoint", type=str, required=True)
 parser.add_argument("--label", type=str, default="config", help="Label printed in the summary row.")
 parser.add_argument("--seed", type=int, default=0)
-parser.add_argument(
-    "--newton_sdf_only",
-    action="store_true",
-    help=(
-        "(Newton only) Disable the hydroelastic SDF pipeline and run on pure penalty-spring "
-        "SDF contacts by nulling ``cfg.sim.physics.newton.collision_cfg.sdf_hydroelastic_config``. "
-        "Hydra struct-mode rejects the equivalent CLI override against PresetCfg, so we apply "
-        "the mutation in Python."
-    ),
-)
 add_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 sys.argv = [sys.argv[0]] + hydra_args
@@ -100,14 +90,6 @@ def main() -> None:
     with launch_simulation(env_cfg, args_cli):
         env_cfg.scene.num_envs = args_cli.num_envs
         env_cfg.seed = args_cli.seed
-
-        if args_cli.newton_sdf_only:
-            physics = getattr(env_cfg.sim, "physics", None)
-            for candidate in (getattr(physics, "newton", None), physics):
-                cc = getattr(candidate, "collision_cfg", None)
-                if cc is not None and hasattr(cc, "sdf_hydroelastic_config"):
-                    cc.sdf_hydroelastic_config = None
-                    break
 
         resume_path = retrieve_file_path(args_cli.checkpoint)
         agent_cfg["params"]["load_checkpoint"] = True
