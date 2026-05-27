@@ -323,6 +323,11 @@ class PhysxManager(PhysicsManager):
         return cls._scene_data_backend
 
     @classmethod
+    def pre_render(cls) -> None:
+        """Sync physics state to Fabric so Kit cameras see updated transforms."""
+        cls.forward()
+
+    @classmethod
     def step(cls) -> None:
         """Step the physics simulation."""
         sim = PhysicsManager._sim
